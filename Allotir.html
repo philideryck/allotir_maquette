@@ -486,8 +486,9 @@ var $ = function(id){ return document.getElementById(id); };
 /* ============================================================
    LOGIQUE PURE — début  (testable hors navigateur)
    ============================================================ */
-var MO = 1048576, LIGNES_EXCEL = 1048576, MAX_FICHIERS = 20000, VERSION_SCHEMA = 1;
-var REGLAGES = { bloc:4 * MO, blocPlan:2 * MO, echantillon:2 * MO, seuil:MO, tampon:48 * MO, ouverts:200, memoire:1024 * MO, ligneMax:64 * MO };
+var MO = 1048576, LIGNES_EXCEL = 1048576, VERSION_SCHEMA = 1;
+var MAX_FICHIERS = 65000;      // une archive ZIP ne peut pas en contenir davantage
+var REGLAGES = { bloc:4 * MO, blocPlan:2 * MO, echantillon:2 * MO, seuil:MO, tampon:48 * MO, ouverts:200, ensemble:16, memoire:1024 * MO, ligneMax:64 * MO };
 function erreur(code){ var e = new Error(code); e.code = code; return e; }
 
 /* ----- Texte ----- */
@@ -897,20 +898,23 @@ function zip(entrees, d){
   f.setUint32(12, tailleC, true); f.setUint32(16, offset, true);
   return new Blob(parts.concat(central, [f.buffer]), {type:'application/zip'});
 }
-/* Sortie en mémoire : les fichiers sont assemblés, puis téléchargés par l'interface */
+/* Sortie en mémoire : les fichiers sont assemblés, puis téléchargés par l'interface.
+   Les morceaux restent de simples tableaux d'octets ; un fichier qui grossit est confié au navigateur (Blob), qui peut le poser sur disque. */
 function sortieMemoire(){
-  var plus = [];
+  var plus = [], vivants = [], total = 0;
+  function confier(lot){ total -= lot.mem; lot.blobs = [new Blob(lot.blobs)]; lot.mem = 0; }
   return {
     lieu: '',
     ecrire: async function(lot, u8){
-      if (!lot.blobs){ lot.blobs = []; lot.crc = 0; lot.pos = 0; }
+      if (!lot.blobs){ lot.blobs = []; lot.crc = 0; lot.pos = 0; lot.mem = 0; vivants.push(lot); }
       lot.crc = crc32(u8, lot.crc); lot.pos += u8.length;
-      lot.blobs.push(new Blob([u8]));
-      if (lot.blobs.length > 64) lot.blobs = [new Blob(lot.blobs)];
+      lot.blobs.push(u8); lot.mem += u8.length; total += u8.length;
+      if (lot.mem > 8 * MO) confier(lot);
+      else if (total > 256 * MO) vivants.forEach(function(l){ if (l.mem) confier(l); });
     },
     fermer: async function(){},
-    taille: async function(lot){ return lot.blobs.reduce(function(s, b){ return s + b.size; }, 0); },
-    ajouter: async function(nom, u8){ plus.push({ nom:nom, blobs:[new Blob([u8])], crc:crc32(u8, 0), pos:u8.length }); },
+    taille: async function(lot){ return lot.blobs.reduce(function(s, b){ return s + (b.size != null ? b.size : b.byteLength); }, 0); },
+    ajouter: async function(nom, u8){ plus.push({ nom:nom, blobs:[u8], crc:crc32(u8, 0), pos:u8.length }); },
     entrees: function(lots){ return lots.concat(plus); },
     abandonner: async function(){ return true; }
   };
@@ -1107,6 +1111,7 @@ async function executer(F, R, sortie, suivi){
       enAttente += besoin;
     }
     lot.lignes++; lot.octets += lo; bilan.gardees++;
+    lot.touche = bilan.gardees;
   }
   function surLigne(buf, a, e, g, estEntete){
     if (maxIdx >= 0) L.lire(buf, a, e, g, maxIdx);
@@ -1120,45 +1125,67 @@ async function executer(F, R, sortie, suivi){
     } else lo = sens ? longueurSortie(buf, a, e, sens) : e - a;
     placer(src, s, f, lo + NL.length);
   }
-  async function ecrireLot(lot){
-    if (!lot.commence){
-      lot.commence = true;
-      var p = new Uint8Array((bomSortie ? 3 : 0) + (R.entete ? enteteSortie.length : 0));
-      if (bomSortie) p.set([0xEF, 0xBB, 0xBF]);
-      if (R.entete) p.set(enteteSortie, bomSortie ? 3 : 0);
-      if (p.length){ await sortie.ecrire(lot, p); lot.ecrits += p.length; }
-    }
-    var u8 = convertir(lot.tampon.subarray(0, lot.nt));
-    await sortie.ecrire(lot, u8); lot.ecrits += u8.length;
-    enAttente -= lot.nt; lot.nt = 0;
+  /* Ce qu'il reste à écrire pour ce fichier : la ligne de titres la première fois, puis les lignes en attente */
+  function contenu(lot){
+    var corps = convertir(lot.tampon.subarray(0, lot.nt)), tete = 0;
+    if (!lot.commence){ lot.commence = true; tete = (bomSortie ? 3 : 0) + (R.entete ? enteteSortie.length : 0); }
+    var u8 = new Uint8Array(tete + corps.length);
+    if (tete && bomSortie) u8.set([0xEF, 0xBB, 0xBF]);
+    if (tete && R.entete) u8.set(enteteSortie, bomSortie ? 3 : 0);
+    u8.set(corps, tete);
+    enAttente -= lot.nt; lot.nt = 0; lot.ecrits += u8.length;
+    return u8;
   }
-  async function vider(tout){
+  /* Écrit ce qui doit l'être.
+     - Un gros fichier en cours (son tampon est plein) reste ouvert : la suite s'y ajoutera.
+     - Un fichier terminé est écrit et refermé d'un coup ; ces écritures-là sont indépendantes et partent plusieurs à la fois,
+       ce qui compte quand il y a des milliers de petits fichiers (un par commande, par exemple).
+     - Si la mémoire se remplit, on écrit d'abord les fichiers qui n'ont pas reçu de ligne depuis le plus longtemps. */
+  async function vider(budget, fin){
+    var suite = [], depots = [], i, lot;
+    for (i = 0; i < actifs.length; i++){
+      lot = actifs[i];
+      if (fin) lot.clos = true;
+      if (!lot.nt) continue;
+      if (lot.clos){ lot.depot = true; depots.push(lot); }
+      else if (lot.nt >= REGLAGES.seuil) suite.push(lot);
+    }
+    for (i = 0; i < suite.length; i++) await sortie.ecrire(suite[i], contenu(suite[i]), true);
+    if (enAttente > budget){
+      var vieux = actifs.filter(function(l){ return l.nt && !l.depot; }).sort(function(x, y){ return x.touche - y.touche; }), reste = enAttente;
+      depots.forEach(function(l){ reste -= l.nt; });
+      for (i = 0; i < vieux.length && reste > budget / 2; i++){ reste -= vieux[i].nt; depots.push(vieux[i]); }
+    }
+    for (i = 0; i < depots.length; i += REGLAGES.ensemble){
+      var faits = await Promise.allSettled(depots.slice(i, i + REGLAGES.ensemble).map(function(l){ return sortie.ecrire(l, contenu(l), false); }));
+      for (var k = 0; k < faits.length; k++) if (faits[k].status === 'rejected') throw faits[k].reason;
+    }
     var ferme = false;
-    for (var i = 0; i < actifs.length; i++){
-      var lot = actifs[i];
-      if (lot.nt && (tout || lot.clos || lot.nt >= REGLAGES.seuil)) await ecrireLot(lot);
-      if (lot.clos){
-        await sortie.fermer(lot);
-        if (!sens && lot.ecrits !== lot.octets) throw erreur('controle');
-        lot.octets = lot.ecrits; lot.etat = 'ecrit'; lot.tampon = null; ferme = true;
-      }
+    for (i = 0; i < actifs.length; i++){
+      lot = actifs[i]; lot.depot = false;
+      if (!lot.clos) continue;
+      await sortie.fermer(lot);
+      if (!sens && lot.ecrits !== lot.octets) throw erreur('controle');
+      lot.octets = lot.ecrits; lot.etat = 'ecrit'; lot.tampon = null; ferme = true;
     }
     if (ferme) actifs = actifs.filter(function(l){ return l.etat !== 'ecrit'; });
   }
   bilan.vides = await parcourir(F, simulation ? REGLAGES.blocPlan : REGLAGES.bloc, surLigne, async function(lu, total){
     /* beaucoup de fichiers ouverts à la fois : on vide moins souvent, pour limiter les réouvertures */
-    if (!simulation) await vider(enAttente >= REGLAGES.tampon * (actifs.length > REGLAGES.ouverts ? 4 : 1));
+    if (!simulation) await vider(REGLAGES.tampon * (actifs.length > REGLAGES.ouverts ? 4 : 1), false);
     if (suivi.annule && suivi.annule()) throw erreur('arret');
     if (suivi.bloc) await suivi.bloc(lu, total, lots, bilan);
   });
   if (!simulation){
-    actifs.forEach(function(l){ l.clos = true; });
-    await vider(true);
+    await vider(0, true);
     /* Contrôles : chaque fichier relu fait la taille écrite, et aucune ligne gardée ne manque */
     var somme = 0;
-    for (var i = 0; i < lots.length; i++){
-      somme += lots[i].lignes;
-      if (await sortie.taille(lots[i]) !== lots[i].ecrits) throw erreur('controle');
+    for (var i = 0; i < lots.length; i += REGLAGES.ensemble){
+      var tailles = await Promise.all(lots.slice(i, i + REGLAGES.ensemble).map(function(l){ return sortie.taille(l); }));
+      for (var k = 0; k < tailles.length; k++){
+        somme += lots[i + k].lignes;
+        if (tailles[k] !== lots[i + k].ecrits) throw erreur('controle');
+      }
     }
     if (somme !== bilan.gardees) throw erreur('controle');
   }
@@ -1517,7 +1544,7 @@ function rendreAction(){
   else if (!n){ titre = 'Rien à découper'; detail = 'Aucune ligne ne correspond à tes filtres.'; }
   else {
     titre = 'Prêt : ' + pluriel(n, 'fichier') + ', ' + pluriel(P.bilan.gardees, 'ligne');
-    detail = api ? 'Écris-les dans un dossier, ou télécharge-les.' : 'Ils arrivent dans Téléchargements' + (n > 1 ? ', réunis dans un fichier ZIP.' : '.');
+    detail = n > 2000 ? 'Cela fait beaucoup de fichiers : vérifie que c’est bien ce que tu veux.' : api ? 'Écris-les dans un dossier, ou télécharge-les.' : 'Ils arrivent dans Téléchargements' + (n > 1 ? ', réunis dans un fichier ZIP.' : '.');
   }
   $('aTitre').textContent = titre;
   vider(d); d.appendChild(document.createTextNode(detail));
@@ -1643,21 +1670,30 @@ async function sortieDossier(parent, base){
   var dir = await parent.getDirectoryHandle(nom, {create:true}), ouverts = [];
   return {
     lieu: (parent.name ? parent.name + '/' : '') + nom,
-    ecrire: async function(lot, u8){
+    /* garder = vrai : le fichier reste ouvert pour la suite (au plus REGLAGES.ouverts à la fois).
+       garder = faux : il est écrit puis refermé aussitôt ; ces appels-là peuvent partir à plusieurs. */
+    ecrire: async function(lot, u8, garder){
       if (!lot.h){
         try { lot.h = await dir.getFileHandle(lot.nom, {create:true}); }
         catch (e){ var x = erreur('nom'); x.nom = lot.nom; throw x; }
         lot.pos = 0;
       }
-      if (!lot.w){
-        lot.w = await lot.h.createWritable({keepExistingData:true});
-        ouverts.push(lot);
-        if (ouverts.length > REGLAGES.ouverts){ var vieux = ouverts.shift(); await vieux.w.close(); vieux.w = null; }   // il rouvrira à la suite
+      var w = lot.w;
+      if (!w){
+        w = await lot.h.createWritable({keepExistingData:lot.pos > 0});
+        if (garder){
+          lot.w = w; ouverts.push(lot);
+          if (ouverts.length > REGLAGES.ouverts){ var vieux = ouverts.shift(), vw = vieux.w; vieux.w = null; await vw.close(); }   // il rouvrira à la suite
+        }
       }
-      await lot.w.write({type:'write', position:lot.pos, data:u8});
+      await w.write({type:'write', position:lot.pos, data:u8});
       lot.pos += u8.length;
+      if (!garder){
+        if (lot.w){ ouverts.splice(ouverts.indexOf(lot), 1); lot.w = null; }
+        await w.close();
+      }
     },
-    fermer: async function(lot){ if (lot.w){ ouverts.splice(ouverts.indexOf(lot), 1); await lot.w.close(); lot.w = null; } },
+    fermer: async function(lot){ if (lot.w){ var w = lot.w; ouverts.splice(ouverts.indexOf(lot), 1); lot.w = null; await w.close(); } },
     taille: async function(lot){ return (await lot.h.getFile()).size; },
     ajouter: async function(n, u8){ var h = await dir.getFileHandle(n, {create:true}), w = await h.createWritable(); await w.write(u8); await w.close(); },
     abandonner: async function(){
