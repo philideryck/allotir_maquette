@@ -185,8 +185,9 @@ input[aria-invalid=true]{border-color:var(--rouge);box-shadow:0 0 0 1px var(--ro
 /* Plan et résultat */
 .plan-tete{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
 .etat{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 11px;font-size:13px;font-weight:700;background:var(--creux);color:var(--doux)}
-.etat.exact{background:var(--vert-pale);color:var(--vert)}
-.etat.calcul{background:var(--ambre-pale);color:var(--ambre)}
+.etat.e-apercu{background:var(--choisi);color:var(--titre)}
+.etat.e-calcul,.etat.e-ecriture{background:var(--ambre-pale);color:var(--ambre)}
+.etat.e-ecrit{background:var(--vert-pale);color:var(--vert)}
 .liste{border:1px solid var(--bord);border-radius:10px;overflow:hidden}
 .ligne{display:grid;grid-template-columns:minmax(0,1fr) 130px 90px;gap:4px 14px;align-items:center;padding:9px 14px;border-bottom:1px solid var(--bord);position:relative}
 .ligne:last-child{border-bottom:0}
@@ -846,7 +847,7 @@ function recapitulatif(F, cfg, res, lieu, date){
   function droite(s, w){ s = String(s); while (s.length < w) s = ' ' + s; return s; }
   function gauche(s, w){ s = String(s); while (s.length < w) s += ' '; return s; }
   function net(s){ return s.replace(/ /g, ' '); }
-  L.push('ALLOTIR - récapitulatif du découpage', 'Date : ' + date, '');
+  L.push('ALLOTIR - récapitulatif de la découpe', 'Date : ' + date, 'Nature : découpe réelle, les fichiers listés ci-dessous ont été écrits.', '');
   L.push('Fichier d’origine : ' + F.nom + ' (' + fmtTaille(F.taille) + ', ' + pluriel(b.lues, 'ligne') + ', ' + pluriel(F.cols.length, 'colonne') + ')', '');
   L.push('Critères');
   L.push('- Colonnes : ' + (cfg.colonnes ? nCols + ' gardées sur ' + F.cols.length + ' : ' + cfg.colonnes.join(', ') : 'toutes (' + F.cols.length + ')'));
@@ -1307,7 +1308,10 @@ function choisirConfig(exemple){
   } else {
     c = configParDefaut();
     c.limite = nettoyerLimite(store.pref.limite); c.encodage = store.pref.encodage; c.entete = store.pref.entete;
-    if (exemple){ c.par = 'colonne'; c.colonne = 'Magasin'; }
+    if (exemple){
+      c.par = 'colonne'; c.colonne = 'Magasin';
+      etat.bandeau = { sansZero:true, texte:'Fichier d’exemple : ses données sont fictives, mais la découpe est réelle. Si tu la lances, de vrais fichiers sont écrits.' };
+    }
   }
   completer(c);
   etat.cfg = c;
@@ -1375,7 +1379,7 @@ function rendreFiche(){
   vider(v); v.appendChild(ic(trop ? 'alerte' : 'coche')); v.appendChild(document.createTextNode(trop ? 'Trop gros pour Excel' : 'S’ouvre dans Excel'));
   v.title = trop ? 'Excel n’ouvre que les ' + fmtN(LIGNES_EXCEL) + ' premières lignes d’un fichier.' : 'Le fichier compte moins de ' + fmtN(LIGNES_EXCEL) + ' lignes.';
   $('bandeau').hidden = !etat.bandeau;
-  if (etat.bandeau){ $('bandeauTexte').textContent = etat.bandeau.texte; $('bandeau').classList.toggle('alerte', !!etat.bandeau.alerte); }
+  if (etat.bandeau){ $('bandeauTexte').textContent = etat.bandeau.texte; $('bandeau').classList.toggle('alerte', !!etat.bandeau.alerte); $('btnZero').hidden = !!etat.bandeau.sansZero; }
 }
 function rendreColonnes(){
   var g = $('grilleCol'), q = norm($('chercheCol').value), garde = colonnesGardees();
@@ -1490,8 +1494,14 @@ function rendrePlan(){
   if (!P){ e.hidden = true; $('rPlan').textContent = ''; return; }
   if (P.bloquant){ e.hidden = true; $('rPlan').textContent = ''; corps.appendChild(el('p', {class:'note alerte', text:P.bloquant})); return; }
   e.hidden = false;
-  e.className = 'etat ' + (P.fini ? 'exact' : 'calcul');
-  e.textContent = P.enCours ? 'Écriture en cours' : P.fait ? 'Fichiers écrits' : P.fini ? 'Nombres exacts' : 'Calcul en cours… ' + Math.round(P.pct * 100) + ' %';
+  /* Toujours dire ce qu'on regarde : un aperçu calculé (rien n'est écrit) ou une découpe réelle */
+  var nature = P.enCours ? 'ecriture' : P.fait ? 'ecrit' : P.fini ? 'apercu' : 'calcul';
+  e.dataset.etat = nature;
+  e.className = 'etat e-' + nature;
+  e.textContent = { ecriture:'Découpe réelle en cours', ecrit:'Découpe réelle · fichiers écrits', apercu:'Aperçu exact · rien n’est encore écrit',
+                    calcul:'Aperçu en cours de calcul… ' + Math.round(P.pct * 100) + ' %' }[nature];
+  e.title = nature === 'ecrit' ? 'Ces fichiers existent : ils ont été écrits pour de bon.' : nature === 'ecriture' ? 'Les fichiers sont en train d’être écrits pour de bon.'
+          : 'Calculé en lisant tout le fichier, sans rien écrire. Les fichiers ne sont créés que lorsque tu lances la découpe.';
   var lots = P.lots || [], b = P.bilan;
   if (!b){ $('rPlan').textContent = 'Lecture du fichier…'; return; }
   $('rPlan').textContent = pluriel(lots.length, 'fichier') + ' · ' + pluriel(b.gardees, 'ligne') + (b.gardees < b.lues ? ' sur ' + fmtN(b.lues) : '') + ' · ' +
@@ -1539,12 +1549,13 @@ function rendreAction(){
   bz.className = 'btn btn-grand ' + (api ? 'btn-secondaire' : 'btn-primaire');
   if (!P) titre = 'Préparation…';
   else if (P.bloquant){ titre = 'Découpe impossible pour l’instant'; detail = P.bloquant; }
-  else if (etat.resultat){ titre = 'Découpage terminé'; detail = etat.resultat.titre; }
-  else if (!P.fini){ titre = 'Calcul du résultat… ' + Math.round(P.pct * 100) + ' %'; detail = 'Tu peux lancer la découpe sans attendre.'; }
+  else if (etat.resultat){ titre = 'Découpe réelle terminée'; detail = etat.resultat.court; }
+  else if (!P.fini){ titre = 'Calcul de l’aperçu… ' + Math.round(P.pct * 100) + ' %'; detail = 'Rien n’est encore écrit. Tu peux lancer la découpe sans attendre.'; }
   else if (!n){ titre = 'Rien à découper'; detail = 'Aucune ligne ne correspond à tes filtres.'; }
   else {
     titre = 'Prêt : ' + pluriel(n, 'fichier') + ', ' + pluriel(P.bilan.gardees, 'ligne');
-    detail = n > 2000 ? 'Cela fait beaucoup de fichiers : vérifie que c’est bien ce que tu veux.' : api ? 'Écris-les dans un dossier, ou télécharge-les.' : 'Ils arrivent dans Téléchargements' + (n > 1 ? ', réunis dans un fichier ZIP.' : '.');
+    detail = 'Rien n’est encore écrit. ' + (n > 2000 ? 'Cela fait beaucoup de fichiers : vérifie que c’est bien ce que tu veux.'
+           : api ? 'Écris-les dans un dossier, ou télécharge-les.' : 'Ils arriveront dans Téléchargements' + (n > 1 ? ', réunis dans un fichier ZIP.' : '.'));
   }
   $('aTitre').textContent = titre;
   vider(d); d.appendChild(document.createTextNode(detail));
@@ -1713,14 +1724,14 @@ function choisirDossier(){
   return window.showDirectoryPicker({mode:'readwrite'}).then(function(h){ etat.dossier = h; }).catch(function(){});
 }
 
-/* ---------- Découpage ---------- */
+/* ---------- Découpe réelle ---------- */
 function verrouiller(on){
   $('etapes').inert = on; $('etapes').classList.toggle('verrou', on);
   $('btnChanger').disabled = on; $('btnRecettes').disabled = on; $('btnZero').disabled = on;
 }
 function avancement(live){
   var pct = Math.round(live.pct * 100), n = live.lots.length;
-  $('aTitre').textContent = 'Découpage en cours… ' + pct + ' %';
+  $('aTitre').textContent = 'Découpe réelle en cours… ' + pct + ' %';
   $('aDetail').textContent = pluriel(live.bilan.gardees, 'ligne répartie', 'lignes réparties') + ' dans ' + pluriel(n, 'fichier') + '.';
   $('jaugeBarre').style.width = (live.pct * 100) + '%';
 }
@@ -1729,26 +1740,28 @@ function compteRendu(res, dest, lieu, livre, recap){
   if (dest === 'dossier') titre = pluriel(n, 'fichier écrit', 'fichiers écrits') + ' dans le dossier « ' + lieu + ' »';
   else if (n === 1) titre = '« ' + livre + ' » est dans Téléchargements';
   else titre = pluriel(n, 'fichier réuni', 'fichiers réunis') + ' dans « ' + livre + ' », dans Téléchargements';
+  var court = titre;
+  titre = 'Découpe réelle : ' + titre;
   if (b.vides) notes.push(pluriel(b.vides, 'ligne vide ignorée', 'lignes vides ignorées') + '.');
   if (b.remplaces) notes.push(pluriel(b.remplaces, 'caractère', 'caractères') + ' sans équivalent en Windows-1252 ' + (b.remplaces > 1 ? 'ont été remplacés' : 'a été remplacé') + ' par « ? ».');
-  return { titre:titre, recap:recap, notes:notes.join(' '),
+  return { titre:titre, court:court, recap:recap, notes:notes.join(' '),
            detail:'Contrôle : ' + pluriel(b.lues, 'ligne lue', 'lignes lues') + (ecartees ? ', ' + fmtN(b.gardees) + ' gardée' + (b.gardees > 1 ? 's' : '') + ' et ' + fmtN(ecartees) + ' écartée' + (ecartees > 1 ? 's' : '') + ' par tes filtres.'
                                                                                            : ', toutes rangées dans les fichiers.') + (n > 1 || dest === 'dossier' ? ' Un récapitulatif est joint.' : '') };
 }
 function raisonEchec(e, lieu){
   var s;
-  if (e.code === 'arret') s = 'Découpage arrêté.';
-  else if (e.code === 'exces') s = 'Découpage interrompu : ce réglage dépasse le maximum de ' + fmtN(MAX_FICHIERS) + ' fichiers.';
-  else if (e.code === 'ligne') s = 'Découpage interrompu : une ligne dépasse ' + fmtTaille(REGLAGES.ligneMax) + ', un guillemet n’y est sans doute jamais refermé.';
-  else if (e.code === 'nom') s = 'Découpage interrompu : le fichier « ' + e.nom + ' » n’a pas pu être créé dans le dossier.';
-  else if (e.code === 'controle') s = 'Découpage annulé : le contrôle des fichiers écrits a échoué.';
-  else if (e.name === 'QuotaExceededError') s = 'Découpage interrompu : il n’y a plus assez de place sur le disque.';
-  else if (e.name === 'NotReadableError' || e.name === 'NotFoundError') s = 'Découpage interrompu : le fichier d’origine n’est plus lisible (déplacé ou modifié ?). Dépose-le de nouveau.';
-  else if (e.name === 'NotAllowedError' || e.name === 'SecurityError') s = 'Découpage interrompu : l’accès au dossier a été refusé.';
-  else s = 'Découpage interrompu : ' + (e.message || String(e)) + '.';
+  if (e.code === 'arret') s = 'Découpe arrêtée.';
+  else if (e.code === 'exces') s = 'Découpe interrompue : ce réglage dépasse le maximum de ' + fmtN(MAX_FICHIERS) + ' fichiers.';
+  else if (e.code === 'ligne') s = 'Découpe interrompue : une ligne dépasse ' + fmtTaille(REGLAGES.ligneMax) + ', un guillemet n’y est sans doute jamais refermé.';
+  else if (e.code === 'nom') s = 'Découpe interrompue : le fichier « ' + e.nom + ' » n’a pas pu être créé dans le dossier.';
+  else if (e.code === 'controle') s = 'Découpe annulée : le contrôle des fichiers écrits a échoué.';
+  else if (e.name === 'QuotaExceededError') s = 'Découpe interrompue : il n’y a plus assez de place sur le disque.';
+  else if (e.name === 'NotReadableError' || e.name === 'NotFoundError') s = 'Découpe interrompue : le fichier d’origine n’est plus lisible (déplacé ou modifié ?). Dépose-le de nouveau.';
+  else if (e.name === 'NotAllowedError' || e.name === 'SecurityError') s = 'Découpe interrompue : l’accès au dossier a été refusé.';
+  else s = 'Découpe interrompue : ' + (e.message || String(e)) + '.';
   return s + (lieu ? ' Supprime le dossier « ' + lieu + ' » : il contient des fichiers incomplets.' : ' Aucun fichier n’a été conservé.');
 }
-/* Tout ou rien : un découpage arrêté ou en erreur ne laisse aucun fichier derrière lui */
+/* Tout ou rien : une découpe arrêtée ou en erreur ne laisse aucun fichier derrière elle */
 async function lancer(dest){
   var F = etat.F;
   if (!F || etat.enCours) return;
@@ -1811,7 +1824,7 @@ async function lancer(dest){
   etat.R = resoudre(etat.cfg, F);
   rendreFiche(); resumes();
   if (!etat.plan) planifier(); else { rendrePlan(); rendreAction(); }
-  if (etat.resultat){ $('cartePlan').scrollIntoView({behavior:'smooth', block:'start'}); annoncer('Découpage terminé : ' + etat.resultat.titre + '.'); }
+  if (etat.resultat){ $('cartePlan').scrollIntoView({behavior:'smooth', block:'start'}); annoncer(etat.resultat.titre + '.'); }
 }
 
 /* ---------- Recettes ---------- */
@@ -2079,7 +2092,7 @@ App.tester = async function(){
     var F = Object.assign(analyserEchantillon(u8, true), { file:new Blob([u8]), nom:'banc.csv', taille:u8.length });
     var cfg = nettoyerConfig({ par:'colonne', colonne:'Mag', colonnes:['Id', 'Note'] }), s = sortieMemoire();
     var plan = await executer(F, resoudre(cfg, F), null, {}), reel = await executer(F, resoudre(cfg, F), s, {});
-    v('plan = découpage réel', plan.lots.length === 2 && plan.lots.every(function(l, i){ return l.nom === reel.lots[i].nom && l.octets === reel.lots[i].ecrits; }));
+    v('aperçu = découpe réelle', plan.lots.length === 2 && plan.lots.every(function(l, i){ return l.nom === reel.lots[i].nom && l.octets === reel.lots[i].ecrits; }));
     v('contenu du fichier « Lyon »', await new Blob(reel.lots[0].blobs).text() === 'Id;Note\r\n1;"a;b"\r\n3;é\r\n');
     v('archive ZIP construite', zip(s.entrees(reel.lots)).size > 100);
     /* le stockage : écriture puis relecture réelles, sur une clé à part */
