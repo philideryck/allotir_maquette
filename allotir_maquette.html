@@ -357,7 +357,7 @@ tfoot td.num{font-weight:600}
         <label class="coche" id="cRedecoupe">
           <input type="checkbox" id="redecoupe" checked>
           <span>Redécouper les lots encore trop gros
-            <small>en parts égales qui tiennent dans le gabarit choisi sur le tapis</small></span>
+            <small>en parts qui tiennent dans le gabarit choisi sur le tapis</small></span>
         </label>
       </fieldset>
 
@@ -418,7 +418,7 @@ tfoot td.num{font-weight:600}
     </section>
   </div>
 
-  <p class="note-maquette">Maquette de direction visuelle : le découpage est simulé, aucun fichier n'est écrit. Un vrai CSV déposé sur le tapis est réellement analysé sur ses 2 premiers Mo pour estimer les lots.</p>
+  <p class="note-maquette">Un CSV déposé sur le tapis est découpé pour de bon, sur ce poste : rien ne part sur le réseau. Avant le découpage, le plan est estimé sur les 2 premiers Mo du fichier ; les nombres exacts s'affichent une fois les lots écrits. Le fichier d'exemple est fictif, son découpage est simulé. Les classeurs Excel ne sont pas encore lus.</p>
 </div>
 
 <script>
@@ -507,6 +507,20 @@ tfoot td.num{font-weight:600}
     if (cur !== '' || ligne.length || !debut) finLigne();
     return lignes;
   }
+  /* Première fin d'enregistrement hors guillemets : c'est celle qu'on réécrira dans les lots */
+  function finDeLigne(txt, d){
+    var q = false, debut = true;
+    for (var i=0;i<txt.length;i++){
+      var ch = txt[i];
+      if (q){ if (ch === '"'){ if (txt[i+1] === '"') i++; else q = false; } }
+      else if (ch === '"' && debut){ q = true; debut = false; }
+      else if (ch === d) debut = true;
+      else if (ch === '\n') return '\n';
+      else if (ch === '\r') return txt[i+1] === '\n' ? '\r\n' : '\r';
+      else debut = false;
+    }
+    return '\r\n';
+  }
   function ligneVide(l){ return l.length === 1 && l[0].trim() === ''; }
   /* Deux colonnes de même nom deviennent « Nom », « Nom (2) »… pour rester distinguables */
   function nomsUniques(noms){
@@ -533,6 +547,8 @@ tfoot td.num{font-weight:600}
     return lireTranche(file, Math.min(file.size, MAX)).then(function(u8){
       var entier = file.size <= MAX, fin = u8.length;
       if (!entier){ var k = u8.lastIndexOf(10); if (k > 0) fin = k + 1; }
+      if ((u8[0] === 0xFF && u8[1] === 0xFE) || (u8[0] === 0xFE && u8[1] === 0xFF) || u8.subarray(0, 4096).indexOf(0) >= 0) throw new Error('binaire');
+      var bom = u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF;
       var octets = u8.subarray(0, fin), enc = 'utf-8', txt;
       try { txt = new TextDecoder('utf-8', {fatal:true}).decode(octets); }
       catch (e){ enc = 'windows-1252'; txt = new TextDecoder('windows-1252').decode(octets); }
@@ -555,7 +571,8 @@ tfoot td.num{font-weight:600}
         return { nom:nom, idx:ci, distinct: trop ? 5001 : nb, date: echant > 5 && dates / echant > 0.6, dist:null, mois:null };
       });
       return { nom:file.name, taille:file.size, lignes:total, exact:entier, exemple:false, encodage:enc, separateur:sep,
-               cols:cols, rows:rows, octetsEntete: Math.round(octetsParLigne), echantillon: rows.length };
+               cols:cols, rows:rows, octetsEntete: Math.round(octetsParLigne), echantillon: rows.length,
+               file:file, bom:bom, finLigne:finDeLigne(txt, sep) };
     });
   }
 
@@ -563,6 +580,8 @@ tfoot td.num{font-weight:600}
   var F = null;            // fichier courant
   var lots = [];
   var enCours = false, arret = false, nouveauFichier = true;
+  var reel = null;         // découpage réel en cours ou terminé : { lots, gardees, fini }
+  var dossier = null;      // dossier de destination choisi ; sinon, Téléchargements
   var conds = [];          // {col, op, val}
 
   var dernierValide = Object.create(null);
@@ -595,9 +614,9 @@ tfoot td.num{font-weight:600}
   function colParNom(n){ for (var i=0;i<F.cols.length;i++) if (F.cols[i].nom === n) return F.cols[i]; return null; }
 
   /* Distribution d'une colonne (exemple : connue ; réel : échantillon) */
-  function passe(v, c){
-    var a = norm(v), b = norm(c.val);
-    switch (c.op){
+  function passe(v, c){ return passeNorm(norm(v), c.op, norm(c.val)); }
+  function passeNorm(a, op, b){
+    switch (op){
       case 'contient': return a.indexOf(b) >= 0;
       case 'est': return a === b;
       case 'nest': return a !== b;
@@ -665,8 +684,9 @@ tfoot td.num{font-weight:600}
     res = res.map(function(r){ return [r[0], r[1], Math.round(r[2])]; }).filter(function(r){ return r[2] > 0; });
     return { groupes:res, gardees:Math.round(gardees) };
   }
-  function regrouper(cle){
-    var g = $('granularite').value, y = cle.slice(0,4), mo = +cle.slice(5,7);
+  function regrouper(cle){ return regrouperPar(cle, $('granularite').value); }
+  function regrouperPar(cle, g){
+    var y = cle.slice(0,4), mo = +cle.slice(5,7);
     if (g === 'annee') return y;
     if (g === 'trimestre') return y + '-T' + Math.ceil(mo / 3);
     return cle;
@@ -682,23 +702,29 @@ tfoot td.num{font-weight:600}
   }
 
   /* ---------- Calcul des lots ---------- */
+  /* Deux lots ne portent jamais le même nom, casse ignorée (Windows et macOS les confondraient) */
+  function nommeur(){
+    var tiges = Object.create(null), pris = Object.create(null);
+    return {
+      tige: function(t){ var c = t, k = 1; while (tiges[c.toLowerCase()]){ k++; c = t + '-' + k; } tiges[c.toLowerCase()] = true; return c; },
+      nom: function(tige, suffixe){
+        var n = tige + suffixe + '.csv', k = 1;
+        while (pris[n.toLowerCase()]){ k++; n = tige + '-' + k + suffixe + '.csv'; }
+        pris[n.toLowerCase()] = true;
+        return n;
+      }
+    };
+  }
+  function baseNom(){ return F.nom.replace(/\.[^.]+$/, '').slice(0, 120) || 'lots'; }
   function calculer(){
     var g = gabarit(), m = mode(), bpl = octetsParLigne();
     var entete = $('entete').checked, oEnt = entete ? F.octetsEntete : 0;
     var maxL = Math.min(g.lignes - (entete ? 1 : 0), Math.floor((g.octets - oEnt) / bpl));
     maxL = Math.max(1, maxL);
-    var base = F.nom.replace(/\.[^.]+$/, '');
+    if (reel){ lots = reel.lots; return { g:g, gardees:reel.gardees, maxL:maxL }; }
+    var base = baseNom(), N = nommeur();
     var G = groupes(), out = [];
     var redec = $('redecoupe').checked;
-    /* Deux lots ne portent jamais le même nom, casse ignorée (Windows et macOS les confondraient) */
-    var tiges = Object.create(null), pris = Object.create(null);
-    function tigeLibre(t){ var c = t, k = 1; while (tiges[c.toLowerCase()]){ k++; c = t + '-' + k; } tiges[c.toLowerCase()] = true; return c; }
-    function nomLibre(tige, suffixe){
-      var n = tige + suffixe + '.csv', k = 1;
-      while (pris[n.toLowerCase()]){ k++; n = tige + '-' + k + suffixe + '.csv'; }
-      pris[n.toLowerCase()] = true;
-      return n;
-    }
     function pousser(cle, lib, nb, part, parts, nomF){
       var oc = nb * bpl + oEnt;
       out.push({ n: out.length + 1, cle:cle, lib:lib, lignes:nb, octets:oc, part:part, parts:parts, nom:nomF,
@@ -709,17 +735,17 @@ tfoot td.num{font-weight:600}
       var par = m === 'lignes' ? Math.max(1, Math.round(nombre('nLignes'))) : Math.max(1, Math.floor((nombre('nMo') * MO - oEnt) / bpl));
       var tot = G.gardees, nb = Math.ceil(tot / par), w = Math.max(3, String(nb).length);
       if (nb > MAX_LOTS) return refus(nb);
-      for (var i=0;i<nb;i++){ var l = Math.min(par, tot - i * par); pousser(null, 'Lot ' + (i+1), l, i+1, nb, nomLibre(base + '_' + pad(i+1, w), '')); }
+      for (var i=0;i<nb;i++){ var l = Math.min(par, tot - i * par); pousser(null, 'Lot ' + (i+1), l, i+1, nb, N.nom(base + '_' + pad(i+1, w), '')); }
     } else {
       var plan = G.groupes.map(function(gr){ return (redec && gr[2] > maxL) ? Math.ceil(gr[2] / maxL) : 1; });
       var prevus = plan.reduce(function(a, b){ return a + b; }, 0);
       if (prevus > MAX_LOTS) return refus(prevus);
       G.groupes.forEach(function(gr, gi){
-        var parts = plan[gi];
-        var q = Math.floor(gr[2] / parts), r = gr[2] - q * parts;
-        var tige = base + '_' + tigeLibre(sur(gr[0]));
-        for (var p=0;p<parts;p++){
-          pousser(gr[0], gr[1], q + (p < r ? 1 : 0), p+1, parts, nomLibre(tige, parts > 1 ? '_' + (p+1) : ''));
+        var parts = plan[gi], restant = gr[2];
+        var tige = base + '_' + N.tige(sur(gr[0]));
+        for (var p=0;p<parts;p++){      // chaque part est remplie jusqu'à la limite, la dernière prend le reste
+          var nbP = parts > 1 ? Math.min(maxL, restant) : restant; restant -= nbP;
+          pousser(gr[0], gr[1], nbP, p+1, parts, N.nom(tige, p ? '_' + (p+1) : ''));
         }
       });
     }
@@ -728,6 +754,7 @@ tfoot td.num{font-weight:600}
   }
 
   /* ---------- Rendu ---------- */
+  var dernierBilan = null;
   function rendre(){
     if (!F) return;
     var C = calculer(), g = C.g;
@@ -745,19 +772,21 @@ tfoot td.num{font-weight:600}
     ajusterSelect($('gabarit'));
 
     var nTrop = lots.filter(function(l){ return l.trop; }).length;
-    $('bilan').innerHTML = C.exces
+    var bilanHtml = C.exces
       ? '<span class="alerte">Ce réglage produirait ' + fmtN(C.exces) + ' fichiers</span>, plus que le maximum de ' + fmtN(MAX_LOTS) + '. Agrandis les lots ou change de critère.'
-      : !lots.length ? '<span class="alerte">Aucune ligne ne correspond aux conditions</span> : il n’y a rien à découper.'
-      : 'Découpage prévu : ' + fmtN(lots.length) + (lots.length > 1 ? ' lots' : ' lot') +
+      : !lots.length ? (reel && !reel.fini ? 'Découpage en cours…' : '<span class="alerte">Aucune ligne ne correspond aux conditions</span> : il n’y a rien à découper.')
+      : (reel ? (reel.fini ? 'Découpage fait : ' : 'Découpage en cours : ') : 'Découpage prévu : ') + fmtN(lots.length) + (lots.length > 1 ? ' lots' : ' lot') +
       (nTrop ? ', <span class="alerte">dont ' + fmtN(nTrop) + (nTrop > 1 ? ' restent trop gros' : ' reste trop gros') + ' pour ' + esc(g.dans) + '</span>.'
              : (lots.length > 1 ? ', tous tiennent dans ' : ', il tient dans ') + esc(g.dans) + '.');
+    if (bilanHtml !== dernierBilan){ dernierBilan = bilanHtml; $('bilan').innerHTML = bilanHtml; }
     $('avis').textContent = F.exemple ? 'Fichier d’exemple, données fictives.'
+      : (reel && reel.fini ? 'Nombres exacts, comptés pendant le découpage.'
       : (F.exact ? 'Fichier lu en entier : les nombres de lignes sont exacts.'
-                 : 'Estimation faite sur les 2 premiers Mo (' + fmtN(F.echantillon) + ' lignes). Le décompte exact se fera pendant le découpage.');
+                 : 'Estimation faite sur les 2 premiers Mo (' + fmtN(F.echantillon) + ' lignes). Le décompte exact se fera pendant le découpage.'));
 
     // Piste 1
     $('tailleEntier').textContent = fmtTaille(F.taille);
-    $('coteEntier').querySelector('span').textContent = (F.exact ? '' : 'environ ') + fmtN(total) + ' lignes';
+    $('coteEntier').querySelector('span').textContent = (F.exact || F.totalExact ? '' : 'environ ') + fmtN(total) + ' lignes';
     var x = Math.min(100, C.maxL / total * 100);
     var dep = $('depasse'), jg = $('jauge');
     if (C.maxL < total){
@@ -771,7 +800,7 @@ tfoot td.num{font-weight:600}
 
     // Piste 2
     var zone = $('lotsZone'), bande = $('bandeLots');
-    var largeur = Math.max(0.6, C.gardees / total * 100);
+    var largeur = Math.min(100, Math.max(0.6, C.gardees / total * 100));
     zone.style.width = largeur + '%';
     var cg = $('coteGarde');
     if (condsActives().length){ cg.hidden = false; cg.querySelector('span').textContent = fmtN(C.gardees) + ' lignes gardées'; }
@@ -790,7 +819,7 @@ tfoot td.num{font-weight:600}
     } else {
       bande.className = 'bande-lots' + (parLot < 16 ? ' dense' : '') + (nouveauFichier ? ' entree' : '');
       lots.forEach(function(l, i){
-        var cls = 'lot' + (l.trop ? ' trop' : '') + (l.parts > 1 && l.cle !== null ? ' suite' + (l.part > 1 ? ' suite-n' : '') : '') + (l.etat === 'ecrit' ? ' ecrit' : '');
+        var cls = 'lot' + (l.trop ? ' trop' : '') + (l.parts > 1 && l.cle !== null ? ' suite' + (l.part > 1 ? ' suite-n' : '') : '') + (l.etat === 'ecrit' ? ' ecrit' : (l.etat === 'encours' ? ' encours' : ''));
         var info = l.lib + (l.parts > 1 && l.cle !== null ? ' (part ' + l.part + ' sur ' + l.parts + ')' : '') + ', ' + fmtN(l.lignes) + ' lignes, ' + fmtTaille(l.octets) + (l.trop ? ', trop gros' : '');
         html += '<button type="button" class="' + cls + '" data-n="' + l.n + '" style="flex-grow:' + l.lignes + ';--i:' + Math.min(i, 26) + '" aria-label="Lot ' + l.n + ' : ' + esc(info) + '" title="' + esc(info) + '">' +
           '<span class="etq"><span class="k">' + esc(l.lib) + (l.parts > 1 && l.cle !== null ? ' ' + l.part + '/' + l.parts : '') + '</span>' +
@@ -845,7 +874,7 @@ tfoot td.num{font-weight:600}
   function rendreTable(C){
     var html = '';
     lots.slice(0, MAX_LIGNES_TABLE).forEach(function(l){
-      html += '<tr data-n="' + l.n + '" class="' + (l.trop ? 'trop ' : '') + (l.etat === 'ecrit' ? 'ecrit' : '') + '">' +
+      html += '<tr data-n="' + l.n + '" class="' + (l.trop ? 'trop ' : '') + (l.etat === 'ecrit' ? 'ecrit' : (l.etat === 'encours' ? 'encours' : '')) + '">' +
         '<td class="no">' + l.n + '</td>' +
         '<td class="fic" title="' + esc(l.nom) + '">' + esc(l.nom) + '</td>' +
         '<td class="num">' + fmtN(l.lignes) + '</td>' +
@@ -862,9 +891,12 @@ tfoot td.num{font-weight:600}
     $('resume').textContent = C.exces ? fmtN(C.exces) + ' fichiers, c’est trop.'
       : fmtN(lots.length) + (lots.length > 1 ? ' fichiers, ' : ' fichier, ') + fmtN(C.gardees) + (C.gardees > 1 ? ' lignes' : ' ligne') +
         (filtre ? ' gardées sur ' + fmtN(F.lignes) + '.' : ' au total.');
-    $('lancer').textContent = lots.length > 1 ? 'Découper en ' + fmtN(lots.length) + ' fichiers' : (lots.length ? 'Enregistrer 1 fichier' : 'Découper');
+    $('lancer').textContent = reel && !reel.fini ? 'Découpage en cours…' : lots.length > 1 ? 'Découper en ' + fmtN(lots.length) + ' fichiers' : (lots.length ? 'Enregistrer 1 fichier' : 'Découper');
     if (!enCours){
-      $('lancer').disabled = !lots.length;
+      /* Sur un gros fichier, le plan n'est qu'une estimation : un plan vide n'interdit pas d'essayer */
+      $('lancer').disabled = !!C.exces || (!lots.length && !(F.file && !F.exact && !reel));
+    }
+    if (!enCours && !reel){
       var s = '';
       if (C.exces) s = 'Découpage impossible avec ce réglage : il donnerait <b>' + fmtN(C.exces) + ' fichiers</b>, le maximum est de ' + fmtN(MAX_LOTS) + '.';
       else if (!lots.length) s = 'Rien à découper : aucune ligne ne correspond aux conditions.';
@@ -950,14 +982,15 @@ tfoot td.num{font-weight:600}
     var n = condsActives().length;
     $('filtresResume').textContent = n ? n + (n > 1 ? ' conditions actives' : ' condition active') : 'toutes les lignes sont gardées';
   }
-  function reinitEtats(){ lots.forEach(function(l){ l.etat = 'pret'; }); $('barre').style.width = '0'; $('statut').dataset.fin = ''; }
+  function reinitEtats(){ reel = null; lots.forEach(function(l){ l.etat = 'pret'; }); $('barre').style.width = '0'; $('statut').dataset.fin = ''; }
 
-  /* ---------- Découpage simulé ---------- */
   /* Pendant l'écriture, tout ce qui recalcule les lots est verrouillé */
   function verrouiller(on){
-    document.querySelectorAll('#criteres fieldset, #changer, #gabarit, #persoValeur, #persoUnite').forEach(function(f){ f.disabled = on; });
+    document.querySelectorAll('#criteres fieldset, #changer, #gabarit, #persoValeur, #persoUnite, #choixDossier').forEach(function(f){ f.disabled = on; });
   }
-  function decouper(){
+
+  /* ---------- Découpage simulé (fichier d'exemple) ---------- */
+  function simuler(){
     if (enCours || !lots.length) return;
     enCours = true; arret = false; reinitEtats();
     fermerDepot();
@@ -996,6 +1029,435 @@ tfoot td.num{font-weight:600}
       : 'Découpage terminé : <b>' + fmtN(lots.length) + ' fichier' + (lots.length > 1 ? 's' : '') + '</b> dans ' + esc($('dest').textContent) + ' (simulation, rien n’a été écrit).';
   }
 
+  /* ==========================================================
+     DÉCOUPAGE RÉEL
+     Le fichier source est lu par blocs et chaque ligne gardée est recopiée octet pour octet
+     dans son lot : rien n'est chargé en entier en mémoire, rien n'est réécrit au passage.
+     Tout ou rien : un découpage arrêté ou en erreur ne laisse aucun fichier derrière lui.
+     ========================================================== */
+  var REGLAGES = App.reglages = { bloc:4 * MO, seuil:MO, tampon:48 * MO, ouverts:200, memoire:1024 * MO, ligneMax:64 * MO };
+  function erreur(code){ var e = new Error(code); e.code = code; return e; }
+  function joindre(a, b){ var t = new Uint8Array(a.length + b.length); t.set(a); t.set(b, a.length); return t; }
+
+  /* ----- Encodages ----- */
+  var DEC_1252 = null, VERS_1252 = null, SURPLUS_UTF8 = null;
+  function tables1252(){
+    if (DEC_1252) return;
+    DEC_1252 = new TextDecoder('windows-1252');
+    VERS_1252 = Object.create(null); SURPLUS_UTF8 = new Uint8Array(256);
+    for (var b = 128; b < 256; b++){
+      var c = DEC_1252.decode(new Uint8Array([b])).charCodeAt(0);
+      VERS_1252[c] = b;
+      SURPLUS_UTF8[b] = c < 0x800 ? 1 : 2;      // octets en plus une fois le caractère écrit en UTF-8
+    }
+  }
+  function encoder1252(txt, bilan){
+    var out = new Uint8Array(txt.length), n = 0;
+    for (var i=0;i<txt.length;i++){
+      var c = txt.charCodeAt(i);
+      if (c < 128 || (c >= 160 && c < 256)) out[n++] = c;
+      else if (VERS_1252[c] !== undefined) out[n++] = VERS_1252[c];
+      else { if (c >= 0xD800 && c < 0xDC00) i++; out[n++] = 63; bilan.remplaces++; }
+    }
+    return out.subarray(0, n);
+  }
+  /* Taille d'une ligne une fois convertie. sens 1 : Windows-1252 vers UTF-8 ; sens 2 : UTF-8 vers Windows-1252 */
+  function longueurSortie(buf, a, b, sens){
+    var n = 0, i;
+    if (sens === 1){ n = b - a; for (i=a;i<b;i++) if (buf[i] > 127) n += SURPLUS_UTF8[buf[i]]; }
+    else for (i=a;i<b;i++) if ((buf[i] & 0xC0) !== 0x80) n++;
+    return n;
+  }
+  function decodeurSource(){
+    tables1252();
+    if (F.encodage !== 'utf-8') return function(u8){ return DEC_1252.decode(u8); };
+    var strict = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true});
+    return function(u8){ try { return strict.decode(u8); } catch (e){ return DEC_1252.decode(u8); } };
+  }
+  function texteChamp(buf, s, e, dec){
+    var t = '';
+    for (var i=s;i<e;i++){ var c = buf[i]; if (c > 127) return dec(buf.subarray(s, e)); t += String.fromCharCode(c); }
+    return t;
+  }
+  /* Champs d'un seul enregistrement, mêmes règles de guillemets que l'analyse */
+  function champsDe(txt, d){
+    var out = [], cur = '', q = false, debut = true;
+    for (var i=0;i<txt.length;i++){
+      var ch = txt[i];
+      if (q){ if (ch === '"'){ if (txt[i+1] === '"'){ cur += '"'; i++; } else q = false; } else cur += ch; }
+      else if (ch === '"' && debut){ q = true; debut = false; }
+      else if (ch === d){ out.push(cur); cur = ''; debut = true; }
+      else { cur += ch; debut = false; }
+    }
+    out.push(cur);
+    return out;
+  }
+
+  /* ----- Sorties ----- */
+  async function existe(dir, nom){
+    try { await dir.getDirectoryHandle(nom); return true; }
+    catch (e){ if (e.name === 'TypeMismatchError') return true; }
+    try { await dir.getFileHandle(nom); return true; }
+    catch (e2){ return e2.name === 'TypeMismatchError'; }
+  }
+  /* Dans un dossier : les lots vont dans un sous-dossier neuf, pour ne jamais écraser un fichier existant */
+  async function sortieDossier(parent, base){
+    var nom = base + '_lots', k = 1;
+    while (await existe(parent, nom)){ k++; nom = base + '_lots-' + k; }
+    var dir = await parent.getDirectoryHandle(nom, {create:true}), ouverts = [];
+    return {
+      lieu: (parent.name ? parent.name + '/' : '') + nom,
+      ecrire: async function(lot, u8){
+        if (!lot.h){
+          try { lot.h = await dir.getFileHandle(lot.nom, {create:true}); }
+          catch (e){ var x = erreur('nom'); x.nom = lot.nom; throw x; }
+          lot.pos = 0;
+        }
+        if (!lot.w){
+          lot.w = await lot.h.createWritable({keepExistingData:true});
+          ouverts.push(lot);
+          if (ouverts.length > REGLAGES.ouverts){ var vieux = ouverts.shift(); await vieux.w.close(); vieux.w = null; }   // il rouvrira à la suite
+        }
+        await lot.w.write({type:'write', position:lot.pos, data:u8});
+        lot.pos += u8.length;
+      },
+      fermer: async function(lot){ if (lot.w){ ouverts.splice(ouverts.indexOf(lot), 1); await lot.w.close(); lot.w = null; } },
+      taille: async function(lot){ return (await lot.h.getFile()).size; },
+      livrer: async function(){ return nom; },
+      abandonner: async function(){
+        for (var i=0;i<ouverts.length;i++){ try { await ouverts[i].w.abort(); } catch (e){} }
+        try { await parent.removeEntry(nom, {recursive:true}); return true; } catch (e){ return false; }
+      }
+    };
+  }
+  /* Sans dossier : les lots sont assemblés puis téléchargés, en un ZIP s'il y en a plusieurs */
+  function sortieMemoire(base){
+    return {
+      lieu: 'Téléchargements',
+      ecrire: async function(lot, u8){
+        if (!lot.blobs){ lot.blobs = []; lot.crc = 0; lot.pos = 0; }
+        lot.crc = crc32(u8, lot.crc); lot.pos += u8.length;
+        lot.blobs.push(new Blob([u8]));
+        if (lot.blobs.length > 64) lot.blobs = [new Blob(lot.blobs)];
+      },
+      fermer: async function(){},
+      taille: async function(lot){ return lot.blobs.reduce(function(s, b){ return s + b.size; }, 0); },
+      livrer: async function(lots){
+        if (lots.length === 1){ telecharger(new Blob(lots[0].blobs, {type:'text/csv'}), lots[0].nom); return lots[0].nom; }
+        telecharger(zip(lots), base + '_lots.zip');
+        return base + '_lots.zip';
+      },
+      abandonner: async function(){ return true; }
+    };
+  }
+  function telecharger(blob, nom){
+    var a = document.createElement('a'), url = URL.createObjectURL(blob);
+    a.href = url; a.download = nom; a.style.display = 'none';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 120000);
+  }
+  var CRC = null;
+  function crc32(u8, crc){
+    if (!CRC){ CRC = new Uint32Array(256); for (var n=0;n<256;n++){ var c = n; for (var k=0;k<8;k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; CRC[n] = c; } }
+    crc = ~crc;
+    for (var i=0;i<u8.length;i++) crc = CRC[(crc ^ u8[i]) & 255] ^ (crc >>> 8);
+    return ~crc >>> 0;
+  }
+  /* Archive ZIP sans compression : les lots y sont rangés tels quels */
+  function zip(lots){
+    var enc = new TextEncoder(), parts = [], central = [], offset = 0, tailleC = 0, d = new Date();
+    var heure = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    var jour = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    lots.forEach(function(l){
+      var nom = enc.encode(l.nom), t = l.pos;
+      var e = new DataView(new ArrayBuffer(30));
+      e.setUint32(0, 0x04034b50, true); e.setUint16(4, 20, true); e.setUint16(6, 0x0800, true);
+      e.setUint16(10, heure, true); e.setUint16(12, jour, true); e.setUint32(14, l.crc, true);
+      e.setUint32(18, t, true); e.setUint32(22, t, true); e.setUint16(26, nom.length, true);
+      var c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+      c.setUint16(12, heure, true); c.setUint16(14, jour, true); c.setUint32(16, l.crc, true);
+      c.setUint32(20, t, true); c.setUint32(24, t, true); c.setUint16(28, nom.length, true); c.setUint32(42, offset, true);
+      parts.push(e.buffer, nom); Array.prototype.push.apply(parts, l.blobs);
+      central.push(c.buffer, nom);
+      offset += 30 + nom.length + t; tailleC += 46 + nom.length;
+    });
+    var f = new DataView(new ArrayBuffer(22));
+    f.setUint32(0, 0x06054b50, true); f.setUint16(8, lots.length, true); f.setUint16(10, lots.length, true);
+    f.setUint32(12, tailleC, true); f.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [f.buffer]), {type:'application/zip'});
+  }
+
+  /* ----- Le découpage lui-même ----- */
+  async function decouperReel(prevus){
+    var file = F.file, taille = file.size, m = mode(), g = gabarit(), base = baseNom();
+    var SEP = F.separateur.charCodeAt(0), TERM = F.finLigne === '\r' ? 13 : 10;
+    var NL = new Uint8Array(F.finLigne.split('').map(function(c){ return c.charCodeAt(0); }));
+    var cible = $('encodage').value, sens = cible === F.encodage ? 0 : (cible === 'utf-8' ? 1 : 2);
+    var bomSortie = cible === 'utf-8' && (F.encodage === 'utf-8' ? F.bom : true);
+    var repeter = $('entete').checked, sequentiel = m === 'lignes' || m === 'taille';
+    var redec = !sequentiel && $('redecoupe').checked;
+    /* Limites d'un lot : en lignes de données, et en octets une fois écrit */
+    var limL = m === 'lignes' ? Math.max(1, Math.round(nombre('nLignes')))
+             : (redec && isFinite(g.lignes) ? Math.max(1, g.lignes - (repeter ? 1 : 0)) : Infinity);
+    var limO = m === 'taille' ? nombre('nMo') * MO : (redec ? g.octets : Infinity);
+
+    tables1252();
+    var dec = decodeurSource(), decLarge = new TextDecoder(F.encodage, {ignoreBOM:true}), encUtf8 = new TextEncoder();
+    var bilan = { lues:0, gardees:0, vides:0, remplaces:0 };
+    function convertir(u8){
+      if (!sens) return u8;
+      var txt = decLarge.decode(u8);
+      return sens === 1 ? encUtf8.encode(txt) : encoder1252(txt, bilan);
+    }
+
+    /* Colonnes à lire dans chaque ligne : celle du critère et celles des conditions */
+    var colCle = m === 'colonne' ? colParNom($('colonne').value) : (m === 'periode' ? colParNom($('colDate').value) : null);
+    var gran = $('granularite').value, ou = $('logiqueSel').value === 'ou';
+    var cs = condsActives().map(function(c){ return { idx:colParNom(c.col).idx, op:c.op, val:norm(c.val), memo:new Map() }; });
+    var besoin = [], maxIdx = -1, vals = [];
+    if (colCle){ besoin[colCle.idx] = true; maxIdx = colCle.idx; }
+    cs.forEach(function(c){ besoin[c.idx] = true; if (c.idx > maxIdx) maxIdx = c.idx; });
+
+    var R = reel = { lots:[], gardees:0, fini:false };
+    var N = nommeur(), groupes = new Map(), memoCle = new Map(), actifs = [], courant = null;
+    var largeur = Math.max(3, String(prevus).length);
+    var entete = null, enteteSortie = null, enAttente = 0, sortie = null;
+
+    function nouveauLot(grp){
+      if (R.lots.length >= MAX_LOTS) throw erreur('exces');
+      var n = R.lots.length + 1;
+      var lot = { n:n, cle:grp ? grp.cle : null, lib:grp ? grp.lib : 'Lot ' + n, lignes:0, octets:0, part:n, parts:n, nom:'', trop:false, etat:'encours',
+                  entete: repeter || (sequentiel && n === 1), tampon:new Uint8Array(4096), nt:0, ecrits:0, commence:false, clos:false };
+      if (grp){
+        grp.lots.push(lot); lot.part = grp.lots.length;
+        grp.lots.forEach(function(l){ l.parts = grp.lots.length; });
+        lot.nom = N.nom(grp.tige, lot.part > 1 ? '_' + lot.part : '');
+      } else lot.nom = N.nom(base + '_' + pad(n, largeur), '');
+      lot.octets = (bomSortie ? 3 : 0) + (lot.entete ? enteteSortie.length : 0);
+      R.lots.push(lot); actifs.push(lot);
+      return lot;
+    }
+    function groupeDe(brut){
+      var grp = memoCle.get(brut);
+      if (grp) return grp;
+      var v = brut.trim();
+      if (m === 'periode'){ var k = cleMois(v, colCle.nom); v = k ? regrouperPar(k, gran) : 'sans date'; }
+      grp = groupes.get(v);
+      if (!grp){ grp = { cle:v, lib:libelle(v, m), tige:base + '_' + N.tige(sur(v)), lots:[] }; groupes.set(v, grp); }
+      if (memoCle.size < 200000) memoCle.set(brut, grp);
+      return grp;
+    }
+    function gardee(){
+      for (var i=0;i<cs.length;i++){
+        var c = cs[i], v = vals[c.idx], ok = c.memo.get(v);
+        if (ok === undefined){ ok = passeNorm(norm(v), c.op, c.val); if (c.memo.size < 200000) c.memo.set(v, ok); }
+        if (ou && ok) return true;
+        if (!ou && !ok) return false;
+      }
+      return !ou || !cs.length;
+    }
+    function lireChamps(buf, a, b, guillemets){
+      var i;
+      for (i=0;i<=maxIdx;i++) if (besoin[i]) vals[i] = '';
+      if (guillemets){
+        var l = champsDe(dec(buf.subarray(a, b)), F.separateur);
+        for (i=0;i<=maxIdx;i++) if (besoin[i] && l[i] != null) vals[i] = l[i];
+        return;
+      }
+      var k = 0, deb = a;
+      for (i=a;i<b;i++){
+        if (buf[i] === SEP){ if (besoin[k]) vals[k] = texteChamp(buf, deb, i, dec); if (++k > maxIdx) return; deb = i + 1; }
+      }
+      if (besoin[k]) vals[k] = texteChamp(buf, deb, b, dec);
+    }
+    /* Range une ligne gardée dans son lot, en ouvrant le lot suivant si celui-ci est plein */
+    function placer(buf, a, b){
+      var lo = (sens ? longueurSortie(buf, a, b, sens) : b - a) + NL.length, grp = null, lot;
+      if (sequentiel) lot = courant;
+      else { grp = groupeDe(vals[colCle.idx]); lot = grp.lots[grp.lots.length - 1]; }
+      if (!lot || lot.lignes >= limL || (lot.lignes > 0 && lot.octets + lo > limO)){
+        if (lot) lot.clos = true;
+        lot = nouveauLot(grp);
+        if (sequentiel) courant = lot;
+      }
+      var besoinOctets = b - a + NL.length;
+      if (lot.nt + besoinOctets > lot.tampon.length){
+        var t = new Uint8Array(Math.max(lot.tampon.length * 2, lot.nt + besoinOctets));
+        t.set(lot.tampon.subarray(0, lot.nt)); lot.tampon = t;
+      }
+      lot.tampon.set(buf.subarray(a, b), lot.nt); lot.nt += b - a;
+      lot.tampon.set(NL, lot.nt); lot.nt += NL.length;
+      enAttente += besoinOctets;
+      lot.lignes++; lot.octets += lo; bilan.gardees++;
+    }
+    function enregistrement(buf, a, e, guillemets){
+      var vide = true;
+      for (var i=a;i<e;i++){ var c = buf[i]; if (c !== 32 && c !== 13 && (c !== 9 || SEP === 9)){ vide = false; break; } }
+      if (vide){ if (entete) bilan.vides++; return; }
+      if (!entete){ entete = buf.slice(a, e); enteteSortie = convertir(joindre(entete, NL)); return; }
+      bilan.lues++;
+      if (maxIdx >= 0){ lireChamps(buf, a, e, guillemets); if (!gardee()) return; }
+      placer(buf, a, e);
+    }
+    /* Traite les enregistrements complets du bloc ; renvoie la position du premier octet non traité */
+    function traiter(buf, fin){
+      var n = buf.length, a = 0, gq = -1;
+      while (a < n){
+        var b = buf.indexOf(TERM, a), guillemets = false;
+        if (gq < a){ gq = buf.indexOf(34, a); if (gq < 0) gq = Infinity; }
+        if (gq < (b < 0 ? n : b)){          // un guillemet dans la ligne : lecture pas à pas
+          guillemets = true;
+          var q = false, debut = true, i = a;
+          for (; i < n; i++){
+            var c = buf[i];
+            if (q){ if (c === 34){ if (buf[i+1] === 34) i++; else q = false; } }
+            else if (c === 34 && debut){ q = true; debut = false; }
+            else if (c === SEP) debut = true;
+            else if (c === TERM) break;
+            else debut = false;
+          }
+          b = i < n ? i : -1;
+        }
+        var suite = b + 1;
+        if (b < 0){ if (!fin) return a; b = n; suite = n; }
+        var e = b;
+        if (TERM === 10 && e > a && buf[e-1] === 13) e--;
+        enregistrement(buf, a, e, guillemets);
+        a = suite;
+      }
+      return n;
+    }
+    async function ecrireLot(lot){
+      if (!lot.commence){
+        lot.commence = true;
+        var p = new Uint8Array((bomSortie ? 3 : 0) + (lot.entete ? enteteSortie.length : 0));
+        if (bomSortie) p.set([0xEF, 0xBB, 0xBF]);
+        if (lot.entete) p.set(enteteSortie, bomSortie ? 3 : 0);
+        if (p.length){ await sortie.ecrire(lot, p); lot.ecrits += p.length; }
+      }
+      var u8 = convertir(lot.tampon.subarray(0, lot.nt));
+      await sortie.ecrire(lot, u8); lot.ecrits += u8.length;
+      enAttente -= lot.nt; lot.nt = 0;
+    }
+    async function vider(tout){
+      var ferme = false;
+      for (var i=0;i<actifs.length;i++){
+        var lot = actifs[i];
+        if (lot.nt && (tout || lot.clos || lot.nt >= REGLAGES.seuil)) await ecrireLot(lot);
+        if (lot.clos){
+          await sortie.fermer(lot);
+          if (!sens && lot.ecrits !== lot.octets) throw erreur('controle');
+          lot.octets = lot.ecrits; lot.etat = 'ecrit'; lot.tampon = null; ferme = true;
+        }
+      }
+      if (ferme) actifs = actifs.filter(function(l){ return l.etat !== 'ecrit'; });
+    }
+    function majEtats(){
+      R.gardees = bilan.gardees;
+      R.lots.forEach(function(l){ l.trop = l.lignes + (l.entete ? 1 : 0) > g.lignes || l.octets > g.octets; });
+    }
+
+    try {
+      sortie = dossier ? await sortieDossier(dossier, base) : sortieMemoire(base);
+      rendre();
+      var pos = F.bom ? 3 : 0, reste = null, fin = false, dernierRendu = 0, dernierDix = -1;
+      while (!fin){
+        var bloc = new Uint8Array(await file.slice(pos, pos + REGLAGES.bloc).arrayBuffer());
+        pos += bloc.length;
+        fin = pos >= taille || !bloc.length;
+        var buf = reste ? joindre(reste, bloc) : bloc, k = traiter(buf, fin);
+        reste = k < buf.length ? buf.slice(k) : null;
+        if (reste && reste.length > REGLAGES.ligneMax) throw erreur('ligne');
+        await vider(enAttente >= REGLAGES.tampon * (actifs.length > REGLAGES.ouverts ? 4 : 1));
+        if (arret) throw erreur('arret');
+        $('barre').style.width = (pos / taille * 100) + '%';
+        var t = Date.now(), dix = Math.floor(pos / taille * 10);
+        if (t - dernierRendu > 400){ dernierRendu = t; majEtats(); rendre(); }
+        if (dix !== dernierDix){ dernierDix = dix; $('statut').innerHTML = 'Découpage en cours : ' + (dix * 10) + ' % du fichier lu, ' + fmtN(bilan.gardees) + ' lignes réparties.'; }
+      }
+      actifs.forEach(function(l){ l.clos = true; });
+      await vider(true);
+      /* Contrôles : chaque lot relu fait la taille écrite, et aucune ligne gardée ne manque */
+      var somme = 0;
+      for (var i=0;i<R.lots.length;i++){
+        somme += R.lots[i].lignes;
+        if (await sortie.taille(R.lots[i]) !== R.lots[i].ecrits) throw erreur('controle');
+      }
+      if (somme !== bilan.gardees) throw erreur('controle');
+      majEtats();
+      var livre = R.lots.length ? await sortie.livrer(R.lots) : (await sortie.abandonner(), null);
+      R.fini = true; F.lignes = bilan.lues; F.totalExact = true;
+      return { bilan:bilan, livre:livre, lieu:sortie.lieu, filtre:cs.length > 0 };
+    } catch (e){
+      var propre = sortie ? await sortie.abandonner() : true;
+      if (!propre) e.lieu = sortie.lieu;
+      throw e;
+    }
+  }
+
+  function compteRendu(r){
+    var b = r.bilan, n = reel.lots.length, s;
+    if (!n) return 'Aucune ligne ne correspond aux conditions sur les ' + fmtN(b.lues) + ' lignes lues : aucun fichier n’a été écrit.';
+    if (dossier) s = 'Découpage terminé : <b>' + fmtN(n) + (n > 1 ? ' fichiers</b> écrits' : ' fichier</b> écrit') + ' dans le dossier <b>' + esc(r.lieu) + '</b>.';
+    else if (n === 1) s = 'Découpage terminé : <b>' + esc(r.livre) + '</b> est dans Téléchargements.';
+    else s = 'Découpage terminé : <b>' + fmtN(n) + ' fichiers</b> réunis dans <b>' + esc(r.livre) + '</b>, dans Téléchargements.';
+    s += ' ' + pluriel(b.lues, 'ligne') + ' lue' + (b.lues > 1 ? 's' : '') +
+      (r.filtre ? ' : ' + fmtN(b.gardees) + ' gardée' + (b.gardees > 1 ? 's' : '') + ', ' + fmtN(b.lues - b.gardees) + ' écartée' + (b.lues - b.gardees > 1 ? 's' : '') + ' par les conditions.'
+                : ', toutes réparties dans les lots.');
+    if (b.vides) s += ' ' + pluriel(b.vides, 'ligne') + ' vide' + (b.vides > 1 ? 's' : '') + ' ignorée' + (b.vides > 1 ? 's' : '') + '.';
+    if (b.remplaces) s += ' ' + pluriel(b.remplaces, 'caractère') + ' sans équivalent en Windows-1252 remplacé' + (b.remplaces > 1 ? 's' : '') + ' par « ? ».';
+    return s;
+  }
+  function raisonEchec(e){
+    var s;
+    if (e.code === 'arret') s = 'Découpage arrêté.';
+    else if (e.code === 'exces') s = 'Découpage interrompu : ce réglage dépasse le maximum de ' + fmtN(MAX_LOTS) + ' fichiers.';
+    else if (e.code === 'ligne') s = 'Découpage interrompu : une ligne dépasse ' + fmtTaille(REGLAGES.ligneMax) + ', sans doute un guillemet jamais refermé dans le fichier.';
+    else if (e.code === 'nom') s = 'Découpage interrompu : le fichier <b>' + esc(e.nom) + '</b> n’a pas pu être créé dans le dossier.';
+    else if (e.code === 'controle') s = 'Découpage annulé : le contrôle des lots écrits a échoué.';
+    else if (e.name === 'QuotaExceededError') s = 'Découpage interrompu : il n’y a plus assez de place sur le disque.';
+    else if (e.name === 'NotReadableError' || e.name === 'NotFoundError') s = 'Découpage interrompu : le fichier source n’est plus lisible (déplacé ou modifié ?). Dépose-le de nouveau.';
+    else if (e.name === 'NotAllowedError' || e.name === 'SecurityError') s = 'Découpage interrompu : l’accès au dossier a été refusé.';
+    else s = 'Découpage interrompu : ' + esc(e.message || String(e)) + '.';
+    return s + (e.lieu ? ' Supprime le dossier <b>' + esc(e.lieu) + '</b> : il contient des lots incomplets.' : ' Aucun fichier n’a été conservé.');
+  }
+  function choisirDossier(){
+    if (!window.showDirectoryPicker){
+      $('statut').innerHTML = 'Ce navigateur ne sait pas écrire dans un dossier : les lots arrivent dans Téléchargements, réunis dans un fichier ZIP.';
+      return Promise.resolve();
+    }
+    return window.showDirectoryPicker({mode:'readwrite'}).then(function(h){ dossier = h; $('dest').textContent = h.name || 'dossier choisi'; }).catch(function(){});
+  }
+  async function lancerReel(){
+    enCours = true;
+    function renoncer(msg){ enCours = false; $('statut').dataset.fin = '1'; $('statut').innerHTML = msg; }
+    if (!dossier && F.taille > REGLAGES.memoire){
+      if (window.showDirectoryPicker) await choisirDossier();
+      if (!dossier) return renoncer(window.showDirectoryPicker
+        ? 'Ce fichier dépasse ' + fmtTaille(REGLAGES.memoire) + ' : choisis un dossier de destination, les lots y seront écrits directement.'
+        : 'Ce fichier dépasse ' + fmtTaille(REGLAGES.memoire) + ' et ce navigateur ne sait pas écrire dans un dossier. Ouvre Allotir dans Edge ou Chrome.');
+    }
+    if (dossier && dossier.requestPermission){
+      var perm = 'denied';
+      try { perm = await dossier.requestPermission({mode:'readwrite'}); } catch (e){}
+      if (perm !== 'granted') return renoncer('L’accès au dossier <b>' + esc(dossier.name) + '</b> a été refusé. Choisis-le de nouveau.');
+    }
+    var prevus = lots.length, msg;
+    arret = false; reinitEtats(); fermerDepot();
+    $('lancer').disabled = true; $('arreter').hidden = false; verrouiller(true);
+    try { msg = compteRendu(await decouperReel(prevus)); $('barre').style.width = '100%'; }
+    catch (e){ reel = null; $('barre').style.width = '0'; msg = raisonEchec(e); }
+    enCours = false; $('arreter').hidden = true; verrouiller(false);
+    rendre();
+    $('statut').dataset.fin = '1'; $('statut').innerHTML = msg;
+  }
+  function decouper(){
+    if (enCours) return;
+    if (F.file) lancerReel();
+    else if (lots.length) simuler();
+  }
+
   /* ---------- Dépôt de fichier ---------- */
   function titreDepot(t){ $('depot').querySelector('.grand').textContent = t || TITRE_DEPOT; }
   function ouvrirDepot(){ if (enCours) return; titreDepot(); $('depot').hidden = false; $('fermerDepot').hidden = !F; setTimeout(function(){ $('labelChoix').focus(); }, 0); }
@@ -1005,6 +1467,7 @@ tfoot td.num{font-weight:600}
     titreDepot();
     F = fichier; nouveauFichier = true; conds = []; reinitEtats();
     remplirColonnes(); rendreConds(); majModes();
+    $('encodage').value = F.encodage;      // par défaut, les lots gardent l'encodage du fichier source
     $('source').textContent = 'Source lue en ' + (F.encodage === 'utf-8' ? 'UTF-8' : 'Windows-1252') + ', séparateur ' +
       ({';':'point-virgule', ',':'virgule', '\t':'tabulation', '|':'barre verticale'}[F.separateur] || F.separateur) + ', ' + F.cols.length + (F.cols.length > 1 ? ' colonnes.' : ' colonne.');
     fermerDepot();
@@ -1016,7 +1479,7 @@ tfoot td.num{font-weight:600}
     if (ext === 'xlsx' || ext === 'xls'){
       var ex = fichierExemple(); ex.nom = file.name; ex.taille = file.size;
       charger(ex);
-      $('avis').textContent = 'La lecture des classeurs Excel viendra avec l’appli complète : la maquette garde le nom et la taille de ton fichier, avec les colonnes d’exemple.';
+      $('avis').textContent = 'Les classeurs Excel ne sont pas encore lus : enregistre la feuille en CSV pour la découper. En attendant, voici les colonnes d’exemple avec le nom et la taille de ton fichier ; le découpage est simulé.';
       return;
     }
     $('depot').hidden = false;
@@ -1024,6 +1487,8 @@ tfoot td.num{font-weight:600}
     analyserCsv(file).then(charger).catch(function(e){
       titreDepot(e && e.message === 'vide'
         ? 'Ce fichier ne contient pas de lignes lisibles. Choisis un CSV avec une ligne d’en-tête et au moins une ligne de données.'
+        : e && e.message === 'binaire'
+        ? 'Ce fichier n’est pas un CSV lisible (UTF-16 ou fichier binaire). Enregistre-le en « CSV UTF-8 » ou en « CSV (séparateur : point-virgule) », puis réessaie.'
         : 'Ce fichier n’a pas pu être lu. Vérifie qu’il est accessible, puis réessaie.');
     });
   }
@@ -1060,11 +1525,8 @@ tfoot td.num{font-weight:600}
     $('reprendreExemple').addEventListener('click', function(){ charger(fichierExemple()); });
     $('labelChoix').addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); $('choixFichier').click(); } });
     $('choixFichier').addEventListener('change', function(){ recevoir(this.files[0]); this.value = ''; });
-    $('choixDossier').addEventListener('click', function(){
-      if (window.showDirectoryPicker){
-        window.showDirectoryPicker({mode:'readwrite'}).then(function(h){ $('dest').textContent = h.name; }).catch(function(){});
-      } else $('statut').innerHTML = 'Ce navigateur enregistre les lots dans Téléchargements.';
-    });
+    $('choixDossier').addEventListener('click', choisirDossier);
+    window.addEventListener('beforeunload', function(e){ if (enCours && reel){ e.preventDefault(); e.returnValue = ''; } });
     document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && !$('depot').hidden && F) fermerDepot(); });
     var survols = 0;
     document.addEventListener('dragenter', function(e){ e.preventDefault(); if (enCours) return; survols++; if ($('depot').hidden) titreDepot(); $('depot').hidden = false; $('depot').classList.add('survol'); });
