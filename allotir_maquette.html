@@ -70,6 +70,10 @@ button,input,select{font:inherit;color:inherit}
 .perso[hidden]{display:none}
 .perso input,.perso select{background:var(--tapis-fonce);border:1px solid #47678f;border-radius:5px;color:#fff;padding:5px 8px}
 .perso input{width:120px}
+.erreur{font-size:13px;font-weight:600;color:var(--hors)}
+.perso .erreur{flex-basis:100%;color:var(--hors-sur-tapis)}
+input[aria-invalid=true]{border-color:var(--hors)!important;box-shadow:0 0 0 1px var(--hors)}
+.perso input[aria-invalid=true]{border-color:var(--hors-sur-tapis)!important;box-shadow:0 0 0 1px var(--hors-sur-tapis)}
 .btn-tapis{flex:none;background:transparent;border:1px solid rgba(255,255,255,.38);color:#fff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:14px;white-space:nowrap}
 .btn-tapis:hover{background:rgba(255,255,255,.08)}
 .tapis :focus-visible{outline:2px solid var(--trace);outline-offset:2px}
@@ -261,11 +265,12 @@ tfoot td.num{font-weight:600}
         <p class="verdict" id="verdict"><span class="nomfichier" id="vNom"></span> <span id="vAvant"></span> <select id="gabarit" aria-label="Gabarit cible"><option value="excel">Excel</option><option value="pj">une pièce jointe de 10 Mo</option><option value="perso">ma limite</option></select> <span id="vApres"></span></p>
         <div class="perso" id="perso" hidden>
           <label for="persoValeur">Ma limite</label>
-          <input type="number" id="persoValeur" min="1" step="1" value="500000">
+          <input type="number" id="persoValeur" min="1" step="1" value="500000" aria-describedby="persoValeurErr">
           <select id="persoUnite" aria-label="Unité de la limite">
             <option value="lignes">lignes</option>
             <option value="mo">Mo</option>
           </select>
+          <span class="erreur" id="persoValeurErr" role="alert" hidden></span>
         </div>
         <p class="bilan" id="bilan" aria-live="polite"></p>
         <p class="avis" id="avis"></p>
@@ -338,12 +343,14 @@ tfoot td.num{font-weight:600}
         </div>
         <div class="precision" id="pLignes" hidden>
           <label class="champ">Lignes par lot
-            <input type="number" id="nLignes" min="1" step="1000" value="1000000">
+            <input type="number" id="nLignes" min="1" step="1000" value="1000000" aria-describedby="nLignesErr">
+            <span class="erreur" id="nLignesErr" role="alert" hidden></span>
           </label>
         </div>
         <div class="precision" id="pTaille" hidden>
           <label class="champ">Taille maximale par lot (Mo)
-            <input type="number" id="nMo" min="1" step="1" value="10">
+            <input type="number" id="nMo" min="1" step="1" value="10" aria-describedby="nMoErr">
+            <span class="erreur" id="nMoErr" role="alert" hidden></span>
           </label>
         </div>
 
@@ -421,6 +428,8 @@ tfoot td.num{font-weight:600}
   var $ = function(id){ return document.getElementById(id); };
   var MO = 1048576;
   var LIMITE_EXCEL = 1048576;
+  var MAX_LOTS = 20000;     // au-delà, le découpage est refusé (et dit), jamais rogné en silence
+  var TITRE_DEPOT = 'Dépose ici un fichier CSV ou Excel';
 
   /* ---------- Formats ---------- */
   function fmtN(n){ return Math.round(n).toLocaleString('fr-FR').replace(/\u202f/g, '\u00a0'); }
@@ -433,7 +442,7 @@ tfoot td.num{font-weight:600}
   function fmtRatio(r){ return r < 10 ? r.toLocaleString('fr-FR',{maximumFractionDigits:1}) : fmtN(r); }
   function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function norm(s){ return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim(); }
-  function sur(s){ var t = String(s).trim().replace(/[\\\/:*?"<>|\s]+/g,'-').replace(/^-+|-+$/g,''); return t || 'vide'; }
+  function sur(s){ var t = String(s).trim().replace(/[\\\/:*?"<>|\s\x00-\x1f]+/g,'-').slice(0, 80).replace(/^-+|-+$/g,''); return t || 'vide'; }
   function pad(n, w){ var s = String(n); while (s.length < w) s = '0' + s; return s; }
   function hash(s){ var h = 2166136261; for (var i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
   var MOIS = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
@@ -470,26 +479,44 @@ tfoot td.num{font-weight:600}
       fr.readAsArrayBuffer(file.slice(0, n));
     });
   }
-  function detecterSeparateur(ligne){
-    var cands = [';', ',', '\t', '|'], best = ';', max = -1;
-    cands.forEach(function(c){
-      var n = 0, q = false;
-      for (var i=0;i<ligne.length;i++){ var ch = ligne[i]; if (ch === '"') q = !q; else if (!q && ch === c) n++; }
+  function detecterSeparateur(txt){
+    var debut = txt.slice(0, 65536), best = ';', max = 0;
+    [';', ',', '\t', '|'].forEach(function(c){
+      var l = analyserTexte(debut, c).filter(function(x){ return !ligneVide(x); })[0], n = l ? l.length : 0;
       if (n > max){ max = n; best = c; }
     });
     return best;
   }
-  function decouperLigne(l, d){
-    var out = [], cur = '', q = false;
-    for (var i=0;i<l.length;i++){
-      var ch = l[i];
-      if (q){ if (ch === '"'){ if (l[i+1] === '"'){ cur += '"'; i++; } else q = false; } else cur += ch; }
-      else if (ch === '"') q = true;
-      else if (ch === d){ out.push(cur); cur = ''; }
-      else cur += ch;
+  /* Analyse d'un texte CSV : un guillemet n'ouvre un champ que s'il est en tête de champ,
+     et un champ entre guillemets peut contenir le séparateur ou des retours à la ligne. */
+  function analyserTexte(txt, d){
+    var lignes = [], ligne = [], cur = '', q = false, debut = true;
+    function finChamp(){ ligne.push(cur); cur = ''; debut = true; }
+    function finLigne(){ finChamp(); lignes.push(ligne); ligne = []; }
+    for (var i=0;i<txt.length;i++){
+      var ch = txt[i];
+      if (q){
+        if (ch === '"'){ if (txt[i+1] === '"'){ cur += '"'; i++; } else q = false; }
+        else cur += ch;
+      }
+      else if (ch === '"' && debut){ q = true; debut = false; }
+      else if (ch === d) finChamp();
+      else if (ch === '\n' || ch === '\r'){ if (ch === '\r' && txt[i+1] === '\n') i++; finLigne(); }
+      else { cur += ch; debut = false; }
     }
-    out.push(cur);
-    return out;
+    if (cur !== '' || ligne.length || !debut) finLigne();
+    return lignes;
+  }
+  function ligneVide(l){ return l.length === 1 && l[0].trim() === ''; }
+  /* Deux colonnes de même nom deviennent « Nom », « Nom (2) »… pour rester distinguables */
+  function nomsUniques(noms){
+    var pris = Object.create(null);
+    return noms.map(function(n){
+      var c = n, k = 1;
+      while (pris[c]){ k++; c = n + ' (' + k + ')'; }
+      pris[c] = true;
+      return c;
+    });
   }
   function cleMois(v, nomCol){
     var s = String(v).trim(), m;
@@ -510,13 +537,11 @@ tfoot td.num{font-weight:600}
       try { txt = new TextDecoder('utf-8', {fatal:true}).decode(octets); }
       catch (e){ enc = 'windows-1252'; txt = new TextDecoder('windows-1252').decode(octets); }
       txt = txt.replace(/^﻿/, '');
-      var lignes = txt.split(/\r\n|\n|\r/);
-      while (lignes.length && lignes[lignes.length-1] === '') lignes.pop();
+      var sep = detecterSeparateur(txt);
+      var lignes = analyserTexte(txt, sep).filter(function(l){ return !ligneVide(l); });
       if (lignes.length < 2) throw new Error('vide');
-      var sep = detecterSeparateur(lignes[0]);
-      var entete = decouperLigne(lignes[0], sep).map(function(h, i){ return h.trim() || ('Colonne ' + (i+1)); });
-      var rows = [];
-      for (var i=1;i<lignes.length;i++){ if (lignes[i].trim() === '') continue; rows.push(decouperLigne(lignes[i], sep)); }
+      var entete = nomsUniques(lignes[0].map(function(h, i){ return h.trim() || ('Colonne ' + (i+1)); }));
+      var rows = lignes.slice(1);
       var octetsParLigne = fin / lignes.length;
       var total = entier ? rows.length : Math.max(rows.length, Math.round(file.size / octetsParLigne) - 1);
       var cols = entete.map(function(nom, ci){
@@ -540,13 +565,28 @@ tfoot td.num{font-weight:600}
   var enCours = false, arret = false, nouveauFichier = true;
   var conds = [];          // {col, op, val}
 
+  var dernierValide = Object.create(null);
+  function nombre(id){
+    var el = $(id), err = $(id + 'Err'), v = el.value.trim() === '' ? NaN : +el.value;
+    if (!(id in dernierValide)) dernierValide[id] = +el.defaultValue || 1;
+    var ok = isFinite(v) && v >= 1;
+    if (ok) dernierValide[id] = v;
+    el.setAttribute('aria-invalid', ok ? 'false' : 'true');
+    if (err.hidden !== ok) err.hidden = ok;
+    var msg = ok ? '' : 'Indique un nombre d’au moins 1. En attendant, le calcul garde ' + fmtN(dernierValide[id]) + '.';
+    if (err.textContent !== msg) err.textContent = msg;
+    return dernierValide[id];
+  }
+  function pluriel(n, mot){ return fmtN(n) + '\u00a0' + mot + (n > 1 ? 's' : ''); }
+
   function gabarit(){
     var g = $('gabarit').value;
     if (g === 'pj') return { lignes:Infinity, octets:10*MO, dans:'une pièce jointe de 10\u00a0Mo', limite:'10\u00a0Mo', ici:'Limite de 10\u00a0Mo', hors:function(){ return 'au-delà de 10\u00a0Mo'; } };
     if (g === 'perso'){
-      var v = Math.max(1, +$('persoValeur').value || 1), u = $('persoUnite').value;
+      var v = nombre('persoValeur'), u = $('persoUnite').value;
       if (u === 'mo') return { lignes:Infinity, octets:v*MO, dans:'ta limite de ' + fmtN(v) + '\u00a0Mo', limite:fmtN(v) + '\u00a0Mo', ici:'Ta limite', hors:function(){ return 'au-delà de ta limite'; } };
-      return { lignes:v, octets:Infinity, dans:'ta limite de ' + fmtN(v) + '\u00a0lignes', limite:fmtN(v) + '\u00a0lignes', ici:'Ta limite', hors:function(n){ return fmtN(n) + ' lignes au-delà de ta limite'; } };
+      v = Math.max(1, Math.round(v));
+      return { lignes:v, octets:Infinity, dans:'ta limite de ' + pluriel(v, 'ligne'), limite:pluriel(v, 'ligne'), ici:'Ta limite', hors:function(n){ return fmtN(n) + ' lignes au-delà de ta limite'; } };
     }
     return { lignes:LIMITE_EXCEL, octets:Infinity, dans:'Excel', limite:fmtN(LIMITE_EXCEL) + '\u00a0lignes', ici:'Excel s’arrête ici', hors:function(n){ return fmtN(n) + ' lignes qu’Excel ne chargerait pas'; } };
   }
@@ -650,22 +690,36 @@ tfoot td.num{font-weight:600}
     var base = F.nom.replace(/\.[^.]+$/, '');
     var G = groupes(), out = [];
     var redec = $('redecoupe').checked;
+    /* Deux lots ne portent jamais le même nom, casse ignorée (Windows et macOS les confondraient) */
+    var tiges = Object.create(null), pris = Object.create(null);
+    function tigeLibre(t){ var c = t, k = 1; while (tiges[c.toLowerCase()]){ k++; c = t + '-' + k; } tiges[c.toLowerCase()] = true; return c; }
+    function nomLibre(tige, suffixe){
+      var n = tige + suffixe + '.csv', k = 1;
+      while (pris[n.toLowerCase()]){ k++; n = tige + '-' + k + suffixe + '.csv'; }
+      pris[n.toLowerCase()] = true;
+      return n;
+    }
     function pousser(cle, lib, nb, part, parts, nomF){
       var oc = nb * bpl + oEnt;
       out.push({ n: out.length + 1, cle:cle, lib:lib, lignes:nb, octets:oc, part:part, parts:parts, nom:nomF,
                  trop: nb > g.lignes - (entete ? 1 : 0) || oc > g.octets, etat:'pret' });
     }
+    function refus(n){ lots = []; return { g:g, gardees:G.gardees, maxL:maxL, exces:n }; }
     if (m === 'lignes' || m === 'taille'){
-      var par = m === 'lignes' ? Math.max(1, Math.round(+$('nLignes').value || 1)) : Math.max(1, Math.floor(((+$('nMo').value || 1) * MO - oEnt) / bpl));
-      var tot = G.gardees, nb = Math.max(1, Math.ceil(tot / par)), w = Math.max(3, String(nb).length);
-      if (nb > 20000){ par = Math.ceil(tot / 20000); nb = Math.ceil(tot / par); }
-      for (var i=0;i<nb;i++){ var l = Math.min(par, tot - i * par); pousser(null, 'Lot ' + (i+1), l, i+1, nb, base + '_' + pad(i+1, w) + '.csv'); }
+      var par = m === 'lignes' ? Math.max(1, Math.round(nombre('nLignes'))) : Math.max(1, Math.floor((nombre('nMo') * MO - oEnt) / bpl));
+      var tot = G.gardees, nb = Math.ceil(tot / par), w = Math.max(3, String(nb).length);
+      if (nb > MAX_LOTS) return refus(nb);
+      for (var i=0;i<nb;i++){ var l = Math.min(par, tot - i * par); pousser(null, 'Lot ' + (i+1), l, i+1, nb, nomLibre(base + '_' + pad(i+1, w), '')); }
     } else {
-      G.groupes.forEach(function(gr){
-        var parts = (redec && gr[2] > maxL) ? Math.ceil(gr[2] / maxL) : 1;
+      var plan = G.groupes.map(function(gr){ return (redec && gr[2] > maxL) ? Math.ceil(gr[2] / maxL) : 1; });
+      var prevus = plan.reduce(function(a, b){ return a + b; }, 0);
+      if (prevus > MAX_LOTS) return refus(prevus);
+      G.groupes.forEach(function(gr, gi){
+        var parts = plan[gi];
         var q = Math.floor(gr[2] / parts), r = gr[2] - q * parts;
+        var tige = base + '_' + tigeLibre(sur(gr[0]));
         for (var p=0;p<parts;p++){
-          pousser(gr[0], gr[1], q + (p < r ? 1 : 0), p+1, parts, base + '_' + sur(gr[0] === '' ? 'vide' : gr[0]) + (parts > 1 ? '_' + (p+1) : '') + '.csv');
+          pousser(gr[0], gr[1], q + (p < r ? 1 : 0), p+1, parts, nomLibre(tige, parts > 1 ? '_' + (p+1) : ''));
         }
       });
     }
@@ -691,7 +745,10 @@ tfoot td.num{font-weight:600}
     ajusterSelect($('gabarit'));
 
     var nTrop = lots.filter(function(l){ return l.trop; }).length;
-    $('bilan').innerHTML = 'Découpage prévu : ' + fmtN(lots.length) + (lots.length > 1 ? ' lots' : ' lot') +
+    $('bilan').innerHTML = C.exces
+      ? '<span class="alerte">Ce réglage produirait ' + fmtN(C.exces) + ' fichiers</span>, plus que le maximum de ' + fmtN(MAX_LOTS) + '. Agrandis les lots ou change de critère.'
+      : !lots.length ? '<span class="alerte">Aucune ligne ne correspond aux conditions</span> : il n’y a rien à découper.'
+      : 'Découpage prévu : ' + fmtN(lots.length) + (lots.length > 1 ? ' lots' : ' lot') +
       (nTrop ? ', <span class="alerte">dont ' + fmtN(nTrop) + (nTrop > 1 ? ' restent trop gros' : ' reste trop gros') + ' pour ' + esc(g.dans) + '</span>.'
              : (lots.length > 1 ? ', tous tiennent dans ' : ', il tient dans ') + esc(g.dans) + '.');
     $('avis').textContent = F.exemple ? 'Fichier d’exemple, données fictives.'
@@ -719,11 +776,15 @@ tfoot td.num{font-weight:600}
     var cg = $('coteGarde');
     if (condsActives().length){ cg.hidden = false; cg.querySelector('span').textContent = fmtN(C.gardees) + ' lignes gardées'; }
     else cg.hidden = true;
-    $('nbLots').textContent = fmtN(lots.length) + (lots.length > 1 ? ' lots' : ' lot');
+    var nLots = C.exces || lots.length;
+    $('nbLots').textContent = fmtN(nLots) + (nLots > 1 ? ' lots' : ' lot');
 
     var html = '';
     var parLot = zone.getBoundingClientRect().width / Math.max(1, lots.length);
-    if (lots.length > 400 || parLot < 4){
+    if (C.exces){
+      bande.className = 'bande-lots';
+      html = '<div class="bande-masse"><span>' + fmtN(C.exces) + ' lots, c’est trop : agrandis les lots</span></div>';
+    } else if (lots.length > 400 || parLot < 4){
       bande.className = 'bande-lots';
       html = '<div class="bande-masse"><span>' + fmtN(lots.length) + ' lots, détail dans le bordereau</span></div>';
     } else {
@@ -792,16 +853,22 @@ tfoot td.num{font-weight:600}
         '<td class="etat">' + etatTexte(l) + '</td></tr>';
     });
     if (lots.length > MAX_LIGNES_TABLE) html += '<tr class="reste"><td colspan="5">… et ' + fmtN(lots.length - MAX_LIGNES_TABLE) + ' autres lots</td></tr>';
+    if (C.exces) html = '<tr class="reste"><td colspan="5">Trop de fichiers pour dresser le bordereau.</td></tr>';
+    else if (!lots.length) html = '<tr class="reste"><td colspan="5">Aucun lot : aucune ligne ne correspond aux conditions.</td></tr>';
     $('corps').innerHTML = html;
     var oct = lots.reduce(function(s, l){ return s + l.octets; }, 0);
-    $('pied').innerHTML = '<tr><td class="no"></td><td>Total, ' + fmtN(lots.length) + (lots.length > 1 ? ' fichiers' : ' fichier') + '</td><td class="num">' + fmtN(C.gardees) + '</td><td class="num">' + fmtTaille(oct) + '</td><td></td></tr>';
+    $('pied').innerHTML = lots.length ? '<tr><td class="no"></td><td>Total, ' + fmtN(lots.length) + (lots.length > 1 ? ' fichiers' : ' fichier') + '</td><td class="num">' + fmtN(C.gardees) + '</td><td class="num">' + fmtTaille(oct) + '</td><td></td></tr>' : '';
     var filtre = condsActives().length;
-    $('resume').textContent = fmtN(lots.length) + (lots.length > 1 ? ' fichiers, ' : ' fichier, ') + fmtN(C.gardees) + ' lignes' +
-      (filtre ? ' gardées sur ' + fmtN(F.lignes) + '.' : ' au total.');
-    $('lancer').textContent = lots.length > 1 ? 'Découper en ' + fmtN(lots.length) + ' fichiers' : 'Enregistrer 1 fichier';
+    $('resume').textContent = C.exces ? fmtN(C.exces) + ' fichiers, c’est trop.'
+      : fmtN(lots.length) + (lots.length > 1 ? ' fichiers, ' : ' fichier, ') + fmtN(C.gardees) + (C.gardees > 1 ? ' lignes' : ' ligne') +
+        (filtre ? ' gardées sur ' + fmtN(F.lignes) + '.' : ' au total.');
+    $('lancer').textContent = lots.length > 1 ? 'Découper en ' + fmtN(lots.length) + ' fichiers' : (lots.length ? 'Enregistrer 1 fichier' : 'Découper');
     if (!enCours){
+      $('lancer').disabled = !lots.length;
       var s = '';
-      if (lots.length > 500) s = 'Cela fait <b>' + fmtN(lots.length) + ' fichiers</b>. Vérifie le critère avant de lancer.';
+      if (C.exces) s = 'Découpage impossible avec ce réglage : il donnerait <b>' + fmtN(C.exces) + ' fichiers</b>, le maximum est de ' + fmtN(MAX_LOTS) + '.';
+      else if (!lots.length) s = 'Rien à découper : aucune ligne ne correspond aux conditions.';
+      else if (lots.length > 500) s = 'Cela fait <b>' + fmtN(lots.length) + ' fichiers</b>. Vérifie le critère avant de lancer.';
       else if (lots.some(function(l){ return l.trop; }) && !$('redecoupe').checked && (mode() === 'colonne' || mode() === 'periode')) s = 'Coche « Redécouper les lots encore trop gros » pour qu’ils tiennent dans ' + esc(C.g.dans) + '.';
       if (s || !$('statut').dataset.fin) $('statut').innerHTML = s;
     }
@@ -886,13 +953,17 @@ tfoot td.num{font-weight:600}
   function reinitEtats(){ lots.forEach(function(l){ l.etat = 'pret'; }); $('barre').style.width = '0'; $('statut').dataset.fin = ''; }
 
   /* ---------- Découpage simulé ---------- */
+  /* Pendant l'écriture, tout ce qui recalcule les lots est verrouillé */
+  function verrouiller(on){
+    document.querySelectorAll('#criteres fieldset, #changer, #gabarit, #persoValeur, #persoUnite').forEach(function(f){ f.disabled = on; });
+  }
   function decouper(){
     if (enCours || !lots.length) return;
     enCours = true; arret = false; reinitEtats();
+    fermerDepot();
     rendre();
     $('lancer').disabled = true; $('arreter').hidden = false;
-    document.querySelectorAll('#criteres fieldset, #changer').forEach(function(f){ f.disabled = true; });
-    $('gabarit').disabled = true;
+    verrouiller(true);
     var i = 0, n = lots.length, delai = Math.max(8, Math.min(380, 3800 / n));
     var segs = $('bandeLots').querySelectorAll('.lot');
     function etape(){
@@ -917,8 +988,7 @@ tfoot td.num{font-weight:600}
   function finir(faits){
     enCours = false;
     $('lancer').disabled = false; $('arreter').hidden = true;
-    document.querySelectorAll('#criteres fieldset, #changer').forEach(function(f){ f.disabled = false; });
-    $('gabarit').disabled = false;
+    verrouiller(false);
     $('barre').style.width = (faits / lots.length * 100) + '%';
     $('statut').dataset.fin = '1';
     $('statut').innerHTML = arret
@@ -927,18 +997,21 @@ tfoot td.num{font-weight:600}
   }
 
   /* ---------- Dépôt de fichier ---------- */
-  function ouvrirDepot(){ $('depot').hidden = false; $('fermerDepot').hidden = !F; setTimeout(function(){ $('labelChoix').focus(); }, 0); }
+  function titreDepot(t){ $('depot').querySelector('.grand').textContent = t || TITRE_DEPOT; }
+  function ouvrirDepot(){ if (enCours) return; titreDepot(); $('depot').hidden = false; $('fermerDepot').hidden = !F; setTimeout(function(){ $('labelChoix').focus(); }, 0); }
   function fermerDepot(){ $('depot').hidden = true; $('depot').classList.remove('survol'); }
   function charger(fichier){
+    if (enCours) return;
+    titreDepot();
     F = fichier; nouveauFichier = true; conds = []; reinitEtats();
     remplirColonnes(); rendreConds(); majModes();
     $('source').textContent = 'Source lue en ' + (F.encodage === 'utf-8' ? 'UTF-8' : 'Windows-1252') + ', séparateur ' +
-      ({';':'point-virgule', ',':'virgule', '\t':'tabulation', '|':'barre verticale'}[F.separateur] || F.separateur) + ', ' + F.cols.length + ' colonnes.';
+      ({';':'point-virgule', ',':'virgule', '\t':'tabulation', '|':'barre verticale'}[F.separateur] || F.separateur) + ', ' + F.cols.length + (F.cols.length > 1 ? ' colonnes.' : ' colonne.');
     fermerDepot();
     rendre();
   }
   function recevoir(file){
-    if (!file) return;
+    if (!file || enCours) return;
     var ext = (file.name.split('.').pop() || '').toLowerCase();
     if (ext === 'xlsx' || ext === 'xls'){
       var ex = fichierExemple(); ex.nom = file.name; ex.taille = file.size;
@@ -946,9 +1019,12 @@ tfoot td.num{font-weight:600}
       $('avis').textContent = 'La lecture des classeurs Excel viendra avec l’appli complète : la maquette garde le nom et la taille de ton fichier, avec les colonnes d’exemple.';
       return;
     }
-    $('depot').querySelector('.grand').textContent = 'Analyse de ' + file.name + '…';
-    analyserCsv(file).then(charger).catch(function(){
-      $('depot').querySelector('.grand').textContent = 'Ce fichier ne contient pas de lignes lisibles. Choisis un CSV avec une ligne d’en-tête.';
+    $('depot').hidden = false;
+    titreDepot('Analyse de ' + file.name + '…');
+    analyserCsv(file).then(charger).catch(function(e){
+      titreDepot(e && e.message === 'vide'
+        ? 'Ce fichier ne contient pas de lignes lisibles. Choisis un CSV avec une ligne d’en-tête et au moins une ligne de données.'
+        : 'Ce fichier n’a pas pu être lu. Vérifie qu’il est accessible, puis réessaie.');
     });
   }
 
@@ -991,10 +1067,10 @@ tfoot td.num{font-weight:600}
     });
     document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && !$('depot').hidden && F) fermerDepot(); });
     var survols = 0;
-    document.addEventListener('dragenter', function(e){ e.preventDefault(); if (enCours) return; survols++; $('depot').hidden = false; $('depot').classList.add('survol'); });
+    document.addEventListener('dragenter', function(e){ e.preventDefault(); if (enCours) return; survols++; if ($('depot').hidden) titreDepot(); $('depot').hidden = false; $('depot').classList.add('survol'); });
     document.addEventListener('dragover', function(e){ e.preventDefault(); });
     document.addEventListener('dragleave', function(){ survols = Math.max(0, survols - 1); if (!survols && F) fermerDepot(); });
-    document.addEventListener('drop', function(e){ e.preventDefault(); survols = 0; if (enCours) return; var f = e.dataTransfer && e.dataTransfer.files[0]; if (f) recevoir(f); else if (F) fermerDepot(); });
+    document.addEventListener('drop', function(e){ e.preventDefault(); survols = 0; $('depot').classList.remove('survol'); if (enCours) return; var f = e.dataTransfer && e.dataTransfer.files[0]; if (f) recevoir(f); else if (F) fermerDepot(); });
     $('gabarit').addEventListener('change', function(){ $('perso').hidden = this.value !== 'perso'; reinitEtats(); rendre(); });
     brancherLiaisons();
     var t; window.addEventListener('resize', function(){ clearTimeout(t); t = setTimeout(function(){ if (F){ rendreRegle(F.lignes); mesurer(); } }, 120); });
