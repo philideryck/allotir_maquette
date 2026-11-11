@@ -1,0 +1,2073 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Allotir — découper un gros fichier CSV</title>
+<script>
+/* Thème appliqué avant le premier affichage, pour éviter un éclair blanc en mode sombre */
+try { if (JSON.parse(localStorage.getItem('fifi.allotir.v1') || '{}').theme === 'sombre') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
+</script>
+<style>
+/* ==========================================================
+   ALLOTIR — découper un gros fichier CSV selon ses critères
+   Fichier unique, s'ouvre en file://, zéro dépendance, zéro réseau.
+   Identité FIFI : thème clair par défaut, bascule sombre via [data-theme="dark"].
+   ========================================================== */
+:root{
+  /* Socle FIFI */
+  --fifi-bleu:#1e3a5f; --fifi-bleu-clair:#dbeafe; --fifi-rouge:#c0392b;
+  --fifi-fond:#ffffff; --fifi-fond-alt:#f5f7fa; --fifi-texte:#1a202c; --fifi-texte-doux:#4a5568; --fifi-bordure:#e2e8f0;
+  --fifi-police-texte:'DM Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --fifi-police-titre:'Syne',var(--fifi-police-texte);
+  --fifi-radius:10px; --fifi-gap:1rem;
+  --fifi-ombre:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.06);
+  /* Rôles : seules ces variables sont utilisées plus bas */
+  --page:var(--fifi-fond-alt); --carte:var(--fifi-fond); --texte:var(--fifi-texte); --doux:var(--fifi-texte-doux);
+  --bord:var(--fifi-bordure); --bord-fort:#cbd5e1; --titre:var(--fifi-bleu);
+  --primaire:var(--fifi-bleu); --primaire-survol:#16304f; --sur-primaire:#ffffff;
+  --choisi:var(--fifi-bleu-clair); --pale:#eff6ff; --creux:#f8fafc;
+  --rouge:var(--fifi-rouge); --rouge-pale:#fdecea; --vert:#1f7a54; --vert-pale:#e4f5ec; --ambre:#8a5a00; --ambre-pale:#fff3d1;
+  --focus:#2563eb; --voile:rgba(15,23,42,.45); --ombre-haute:0 -6px 20px rgba(15,23,42,.08); --ombre-flot:0 12px 32px rgba(15,23,42,.18);
+}
+[data-theme="dark"]{
+  --page:#0e1621; --carte:#16212f; --texte:#e7edf5; --doux:#a6b3c5; --bord:#283648; --bord-fort:#3a4b61; --titre:#cfe1f7;
+  --primaire:#4a8ad4; --primaire-survol:#63a0e6; --sur-primaire:#06121f;
+  --choisi:#1e3a5f; --pale:#162a41; --creux:#111b28;
+  --rouge:#ff8f80; --rouge-pale:#3a1c19; --vert:#63d3a4; --vert-pale:#12332a; --ambre:#f0c264; --ambre-pale:#3a2e12;
+  --focus:#8ab8ff; --voile:rgba(0,0,0,.6); --fifi-ombre:0 1px 3px rgba(0,0,0,.4); --ombre-haute:0 -6px 20px rgba(0,0,0,.45); --ombre-flot:0 12px 32px rgba(0,0,0,.6);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--page);color:var(--texte);font:15px/1.5 var(--fifi-police-texte);min-height:100vh}
+h1,h2,h3,p{margin:0}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:1.15em;height:1.15em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.18em}
+.num{font-variant-numeric:tabular-nums}
+
+/* ---------- Barre du haut ---------- */
+.barre{background:var(--carte);border-bottom:1px solid var(--bord);position:sticky;top:0;z-index:30}
+.barre-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.marque{display:flex;align-items:center;gap:12px;min-width:0}
+.logo{width:38px;height:38px;border-radius:10px;background:var(--primaire);color:var(--sur-primaire);display:grid;place-items:center;flex:none}
+.logo .ic{width:20px;height:20px}
+.marque h1{font:700 21px/1.1 var(--fifi-police-titre);color:var(--titre);letter-spacing:-.01em}
+.marque p{font-size:13px;color:var(--doux);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.barre-actions{display:flex;gap:6px;align-items:center;flex:none}
+
+/* ---------- Boutons, champs ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:8px 16px;border-radius:8px;border:1px solid transparent;font-weight:600;cursor:pointer;
+  transition:background .15s ease,border-color .15s ease,color .15s ease,box-shadow .15s ease;text-decoration:none;white-space:nowrap}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-primaire{background:var(--primaire);color:var(--sur-primaire)}
+.btn-primaire:hover:not(:disabled){background:var(--primaire-survol)}
+.btn-secondaire{background:var(--carte);border-color:var(--bord-fort);color:var(--titre)}
+.btn-secondaire:hover:not(:disabled){background:var(--pale);border-color:var(--primaire)}
+.btn-discret{background:transparent;color:var(--titre);padding:8px 12px}
+.btn-discret:hover:not(:disabled){background:var(--pale)}
+.btn-danger{background:var(--carte);border-color:var(--rouge);color:var(--rouge)}
+.btn-danger:hover:not(:disabled){background:var(--rouge-pale)}
+.btn-grand{min-height:46px;padding:10px 22px;font-size:16px}
+.btn-icone{padding:8px;min-width:40px}
+.btn-lien{background:none;border:0;padding:0;color:var(--titre);text-decoration:underline;text-underline-offset:2px;cursor:pointer;font-weight:600}
+.btn-lien:hover{color:var(--primaire-survol)}
+.pastille{background:var(--choisi);color:var(--titre);border-radius:999px;font-size:12px;font-weight:700;padding:1px 8px}
+input[type=text],input[type=search],input[type=number],select{background:var(--carte);border:1px solid var(--bord-fort);border-radius:8px;min-height:40px;padding:7px 11px;max-width:100%;transition:border-color .15s ease,box-shadow .15s ease}
+input:hover,select:hover{border-color:var(--primaire)}
+input[type=number]{width:150px;font-variant-numeric:tabular-nums}
+input[type=checkbox],input[type=radio]{width:17px;height:17px;accent-color:var(--primaire);flex:none;margin:0}
+input[aria-invalid=true]{border-color:var(--rouge);box-shadow:0 0 0 1px var(--rouge)}
+.champ{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:600;color:var(--doux);min-width:0}
+.champ select,.champ input{font-size:15px;font-weight:400;color:var(--texte)}
+.erreur{font-size:13px;font-weight:600;color:var(--rouge)}
+
+/* ---------- Page ---------- */
+.page{max-width:1180px;margin:0 auto;padding:22px 20px 150px}
+.carte{background:var(--carte);border:1px solid var(--bord);border-radius:14px;box-shadow:var(--fifi-ombre);padding:20px 22px;margin-bottom:16px}
+
+/* Accueil : premier écran, une seule chose à faire */
+.accueil{max-width:820px;margin:5vh auto 0}
+.depot{background:var(--carte);border:2px dashed var(--bord-fort);border-radius:18px;padding:44px 28px 38px;text-align:center;transition:border-color .15s ease,background .15s ease}
+.depot.survol{border-color:var(--primaire);background:var(--pale)}
+.depot-ic{width:64px;height:64px;border-radius:18px;background:var(--choisi);color:var(--titre);display:inline-grid;place-items:center;margin-bottom:16px}
+.depot-ic .ic{width:30px;height:30px}
+.depot h2{font:700 27px/1.2 var(--fifi-police-titre);color:var(--titre);letter-spacing:-.01em;margin-bottom:10px}
+.depot p{color:var(--doux);max-width:56ch;margin:0 auto;font-size:16px}
+.depot-actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:24px}
+.depot .depot-erreur{margin-top:18px;color:var(--rouge);font-weight:600;font-size:15px;background:var(--rouge-pale);border-radius:10px;padding:10px 14px}
+.atouts{list-style:none;margin:20px 0 0;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.atouts li{background:var(--carte);border:1px solid var(--bord);border-radius:12px;padding:14px 16px;display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:start}
+.atouts .ic{grid-row:1 / 3;width:22px;height:22px;color:var(--titre);margin-top:2px}
+.atouts b{color:var(--titre)}
+.atouts span{color:var(--doux);font-size:14px}
+
+/* Fiche du fichier */
+.fiche{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 20px}
+.fiche-ic{width:44px;height:44px;border-radius:12px;background:var(--choisi);color:var(--titre);display:grid;place-items:center;flex:none}
+.fiche-ic .ic{width:22px;height:22px}
+.fiche-corps{flex:1;min-width:220px}
+.fiche-nom{font:700 18px/1.3 var(--fifi-police-titre);color:var(--titre);overflow-wrap:anywhere}
+.fiche-infos{color:var(--doux);font-size:14px}
+.verdict{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 12px;font-size:13px;font-weight:700}
+.verdict.trop{background:var(--rouge-pale);color:var(--rouge)}
+.verdict.bon{background:var(--vert-pale);color:var(--vert)}
+.verdict.attente{background:var(--creux);color:var(--doux)}
+.bandeau{flex-basis:100%;background:var(--pale);border-radius:10px;padding:9px 14px;font-size:14px;color:var(--texte);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.bandeau.alerte{background:var(--ambre-pale);color:var(--ambre)}
+
+/* Étapes */
+.etape-tete{display:flex;gap:14px;align-items:flex-start;margin-bottom:16px}
+.numero{width:32px;height:32px;border-radius:50%;background:var(--primaire);color:var(--sur-primaire);font:700 15px/32px var(--fifi-police-titre);text-align:center;flex:none}
+.etape-tete h2,.plan-tete h2{font:700 18px/1.3 var(--fifi-police-titre);color:var(--titre)}
+.resume{color:var(--doux);font-size:14px}
+.verrou{opacity:.55;pointer-events:none}
+.pliant{border:1px solid var(--bord);border-radius:10px;background:var(--creux);margin-bottom:14px}
+.pliant>summary{cursor:pointer;padding:10px 14px;font-weight:600;color:var(--titre);list-style:none;display:flex;align-items:center;gap:8px;border-radius:10px}
+.pliant>summary::-webkit-details-marker{display:none}
+.pliant>summary::before{content:"";width:7px;height:7px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(-45deg);transition:transform .15s ease;margin:0 3px 0 2px}
+.pliant[open]>summary::before{transform:rotate(45deg)}
+.pliant>summary:hover{background:var(--pale)}
+.pliant-corps{padding:4px 14px 14px}
+.outils{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.outils input[type=search]{flex:1;min-width:180px}
+.grille-col{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:2px 14px;max-height:260px;overflow:auto;padding:2px}
+.case{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;min-width:0}
+.case:hover{background:var(--pale)}
+.case span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vide{color:var(--doux);font-size:14px;padding:6px 2px}
+
+/* Aperçu des données */
+.apercu-zone{border:1px solid var(--bord);border-radius:10px;overflow:auto;max-height:330px;background:var(--carte)}
+.apercu{border-collapse:separate;border-spacing:0;width:100%;font-size:13.5px}
+.apercu th{position:sticky;top:0;background:var(--creux);border-bottom:1px solid var(--bord-fort);padding:0;text-align:left;z-index:1}
+.apercu th+th,.apercu td+td{border-left:1px solid var(--bord)}
+.entete{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;padding:9px 12px;font-weight:700;color:var(--titre);cursor:pointer;white-space:nowrap;text-align:left}
+.entete:hover{background:var(--choisi)}
+.entete .ic{width:14px;height:14px;opacity:.75}
+.entete .chevron{margin-left:auto;opacity:.45}
+.apercu td{padding:7px 12px;border-bottom:1px solid var(--bord);white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.apercu tr:last-child td{border-bottom:0}
+.apercu tbody tr:hover td{background:var(--creux)}
+.apercu th.cle .entete{background:var(--choisi)}
+.legende{color:var(--doux);font-size:13px;margin-top:8px}
+
+/* Filtres */
+.filtres{display:flex;flex-direction:column;gap:8px}
+.filtre{display:grid;grid-template-columns:minmax(150px,1.1fr) minmax(130px,.8fr) minmax(180px,2fr) auto;gap:8px;align-items:center;background:var(--creux);border:1px solid var(--bord);border-radius:10px;padding:8px}
+.btn-valeurs{justify-content:flex-start;background:var(--carte);border-color:var(--bord-fort);font-weight:400;color:var(--texte);overflow:hidden;min-width:0}
+.btn-valeurs span{overflow:hidden;text-overflow:ellipsis}
+.btn-valeurs:hover{border-color:var(--primaire);background:var(--pale)}
+.btn-valeurs.manque{color:var(--ambre);border-color:var(--ambre);font-weight:600}
+.sans-valeur{color:var(--doux);font-size:14px;padding-left:4px}
+.filtres-pied{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.filtres-pied label{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--doux);flex-wrap:wrap}
+
+/* Répartition */
+.choix{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+.choix-carte{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;align-items:start;border:1px solid var(--bord-fort);border-radius:12px;padding:13px 14px;cursor:pointer;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease}
+.choix-carte:hover{border-color:var(--primaire);background:var(--creux)}
+.choix-carte input{grid-row:1 / 3;margin-top:3px}
+.choix-carte b{color:var(--titre)}
+.choix-carte span{color:var(--doux);font-size:13.5px}
+.choix-carte:has(input:checked){border-color:var(--primaire);background:var(--pale);box-shadow:inset 0 0 0 1px var(--primaire)}
+.choix-carte.inactif{opacity:.55;cursor:not-allowed}
+.reglages{display:flex;gap:14px 18px;flex-wrap:wrap;align-items:flex-start}
+.reglages .champ select{min-width:230px}
+.aide{color:var(--doux);font-size:14px;margin:12px 0 14px}
+.options .pliant-corps{display:flex;gap:16px 24px;flex-wrap:wrap;align-items:flex-end}
+.coche{display:flex;align-items:center;gap:9px;cursor:pointer;min-height:40px}
+.pliant.options{margin-bottom:0}
+
+/* Plan et résultat */
+.plan-tete{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
+.etat{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 11px;font-size:13px;font-weight:700;background:var(--creux);color:var(--doux)}
+.etat.exact{background:var(--vert-pale);color:var(--vert)}
+.etat.calcul{background:var(--ambre-pale);color:var(--ambre)}
+.liste{border:1px solid var(--bord);border-radius:10px;overflow:hidden}
+.ligne{display:grid;grid-template-columns:minmax(0,1fr) 130px 90px;gap:4px 14px;align-items:center;padding:9px 14px;border-bottom:1px solid var(--bord);position:relative}
+.ligne:last-child{border-bottom:0}
+.ligne-nom{display:flex;gap:9px;align-items:center;min-width:0;font-weight:600}
+.ligne-nom span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ligne-nom .ic{color:var(--doux);width:16px;height:16px}
+.ligne.ecrit .ligne-nom .ic{color:var(--vert)}
+.ligne .num{text-align:right;color:var(--texte)}
+.ligne .taille{text-align:right;color:var(--doux);font-size:14px}
+.ligne-barre{grid-column:1 / -1;height:4px;border-radius:2px;background:var(--bord);overflow:hidden}
+.ligne-barre i{display:block;height:100%;background:var(--primaire);border-radius:2px;min-width:2px}
+.ligne .marque-trop{font-size:12px;font-weight:700;color:var(--ambre);background:var(--ambre-pale);border-radius:999px;padding:1px 8px;flex:none}
+.liste-pied{padding:10px 14px;background:var(--creux);text-align:center}
+.note{border-radius:10px;padding:12px 14px;background:var(--creux);color:var(--doux)}
+.note.alerte{background:var(--ambre-pale);color:var(--ambre);font-weight:600}
+.resultat{border-radius:12px;background:var(--vert-pale);padding:16px 18px;margin-bottom:14px;display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.resultat h3{font:700 17px/1.3 var(--fifi-police-titre);color:var(--vert);display:flex;gap:8px;align-items:center}
+.resultat p{color:var(--texte)}
+.resultat-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.resultat details summary{cursor:pointer;color:var(--titre);font-weight:600}
+.resultat pre{margin:8px 0 0;background:var(--carte);border:1px solid var(--bord);border-radius:8px;padding:12px;overflow:auto;max-height:260px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre}
+
+/* Barre d'action, toujours visible en bas */
+.action{position:fixed;left:0;right:0;bottom:0;background:var(--carte);border-top:1px solid var(--bord);box-shadow:var(--ombre-haute);z-index:20}
+.action-in{max-width:1180px;margin:0 auto;padding:12px 20px;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.action-texte{min-width:0;flex:1 1 300px}
+.action-titre{font:700 16px/1.3 var(--fifi-police-titre);color:var(--titre)}
+.action-detail{color:var(--doux);font-size:14px}
+.action-boutons{display:flex;gap:10px;flex-wrap:wrap}
+.jauge{height:6px;border-radius:3px;background:var(--bord);overflow:hidden;margin-top:8px;max-width:520px}
+.jauge i{display:block;height:100%;width:0;background:var(--primaire);border-radius:3px;transition:width .2s ease}
+.toast{position:fixed;left:50%;transform:translateX(-50%);top:74px;background:var(--texte);color:var(--carte);border-radius:10px;padding:11px 16px;box-shadow:var(--ombre-flot);z-index:40;max-width:min(680px,calc(100vw - 32px));font-weight:500}
+.toast.alerte{background:var(--rouge);color:var(--sur-primaire)}
+[data-theme="dark"] .toast.alerte{color:var(--page)}
+
+/* Menu d'une colonne, fenêtres */
+.menu{position:absolute;z-index:35;background:var(--carte);border:1px solid var(--bord-fort);border-radius:10px;box-shadow:var(--ombre-flot);padding:6px;min-width:250px;display:grid}
+.menu button{display:flex;gap:10px;align-items:center;background:none;border:0;border-radius:7px;padding:9px 10px;text-align:left;cursor:pointer}
+.menu button:hover,.menu button:focus-visible{background:var(--pale)}
+.menu .ic{color:var(--titre)}
+dialog{border:1px solid var(--bord-fort);border-radius:16px;padding:0;background:var(--carte);color:var(--texte);box-shadow:var(--ombre-flot);width:min(620px,calc(100vw - 24px));max-height:min(720px,calc(100vh - 24px))}
+dialog::backdrop{background:var(--voile)}
+.dlg{display:flex;flex-direction:column;max-height:min(720px,calc(100vh - 26px))}
+.dlg>header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 20px 12px}
+.dlg h2{font:700 18px/1.3 var(--fifi-police-titre);color:var(--titre);overflow-wrap:anywhere}
+.dlg-outils{display:flex;gap:8px;flex-wrap:wrap;padding:0 20px 10px}
+.dlg-outils input{flex:1;min-width:160px}
+.dlg-info{padding:0 20px 8px;color:var(--doux);font-size:13.5px}
+.dlg-liste{overflow:auto;padding:0 12px;flex:1;min-height:120px;border-top:1px solid var(--bord);border-bottom:1px solid var(--bord)}
+.dlg-liste .case{justify-content:flex-start;padding:8px}
+.dlg-liste .case span{flex:1}
+.dlg-liste .case em{font-style:normal;color:var(--doux);font-variant-numeric:tabular-nums;font-size:14px;flex:none}
+.dlg>footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;flex-wrap:wrap}
+.recette{display:flex;gap:12px;align-items:center;padding:12px 8px;border-bottom:1px solid var(--bord)}
+.recette:last-child{border-bottom:0}
+.recette-corps{flex:1;min-width:0}
+.recette-corps b{color:var(--titre);overflow-wrap:anywhere}
+.recette-corps p{color:var(--doux);font-size:13.5px}
+.dlg-bloc{padding:0 20px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.dlg-bloc input[type=text]{flex:1;min-width:180px}
+.voile{position:fixed;inset:0;background:var(--voile);z-index:50;display:grid;place-items:center;pointer-events:none}
+.voile div{background:var(--carte);color:var(--titre);border:2px dashed var(--primaire);border-radius:18px;padding:30px 40px;font:700 22px var(--fifi-police-titre)}
+
+@media (max-width:820px){
+  .page{padding:16px 12px 190px}
+  .barre-in{padding:8px 12px}
+  .marque p{display:none}
+  .carte{padding:16px 14px}
+  .atouts,.choix{grid-template-columns:1fr}
+  .filtre{grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto}
+  .filtre>:nth-child(3){grid-column:1 / -1;grid-row:2}
+  .filtre>:nth-child(4){grid-column:3;grid-row:1}
+  .filtre select{min-width:0;width:100%}
+  .ligne{grid-template-columns:minmax(0,1fr) auto}
+  .ligne .taille{display:none}
+  .btn{white-space:normal}
+  .depot{padding:32px 18px 28px}
+  .depot h2{font-size:23px}
+  .action-boutons{width:100%}
+  .action-boutons .btn{flex:1}
+  .reglages .champ,.reglages .champ select{width:100%;min-width:0}
+}
+@media (prefers-reduced-motion:reduce){ *{transition:none!important} }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <symbol id="i-ciseaux" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/></symbol>
+  <symbol id="i-fichier" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+  <symbol id="i-dossier" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-telecharger" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-deposer" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+  <symbol id="i-coche" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-alerte" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-croix" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-lune" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-soleil" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-filtre" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54z"/></symbol>
+  <symbol id="i-colonnes" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></symbol>
+  <symbol id="i-signet" viewBox="0 0 24 24"><path d="m19 21-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-corbeille" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+</defs></svg>
+
+<header class="barre">
+  <div class="barre-in">
+    <div class="marque">
+      <span class="logo"><svg class="ic" aria-hidden="true"><use href="#i-ciseaux"/></svg></span>
+      <div><h1>Allotir</h1><p>Découper un gros fichier CSV selon tes critères</p></div>
+    </div>
+    <div class="barre-actions">
+      <button type="button" class="btn btn-discret" id="btnRecettes"><svg class="ic" aria-hidden="true"><use href="#i-signet"/></svg> Recettes <span class="pastille" id="nbRecettes" hidden></span></button>
+      <button type="button" class="btn btn-discret btn-icone" id="btnTheme" aria-label="Passer au thème sombre" title="Thème clair ou sombre"><svg class="ic" aria-hidden="true"><use id="icTheme" href="#i-lune"/></svg></button>
+    </div>
+  </div>
+</header>
+
+<main class="page">
+  <!-- Premier écran : une seule chose à faire, déposer son fichier -->
+  <section class="accueil" id="accueil" aria-labelledby="titreDepot">
+    <div class="depot" id="zoneDepot">
+      <span class="depot-ic"><svg class="ic" aria-hidden="true"><use href="#i-deposer"/></svg></span>
+      <h2 id="titreDepot">Dépose ton fichier CSV ici</h2>
+      <p id="texteDepot">Garde les colonnes et les lignes utiles, puis découpe-le en fichiers qui s’ouvrent dans Excel. Tout se passe sur ce poste : rien n’est envoyé.</p>
+      <div class="depot-actions">
+        <button type="button" class="btn btn-primaire btn-grand" id="btnChoisir"><svg class="ic" aria-hidden="true"><use href="#i-fichier"/></svg> Choisir un fichier</button>
+        <button type="button" class="btn btn-secondaire btn-grand" id="btnExemple">Essayer avec un exemple</button>
+      </div>
+      <p class="depot-erreur" id="erreurDepot" role="alert" hidden></p>
+    </div>
+    <ul class="atouts">
+      <li><svg class="ic" aria-hidden="true"><use href="#i-colonnes"/></svg><b>Les colonnes utiles</b><span>Retire celles dont tu n’as pas besoin.</span></li>
+      <li><svg class="ic" aria-hidden="true"><use href="#i-filtre"/></svg><b>Les bonnes lignes</b><span>Coche les valeurs à garder, colonne par colonne.</span></li>
+      <li><svg class="ic" aria-hidden="true"><use href="#i-ciseaux"/></svg><b>Des fichiers à la bonne taille</b><span>Un par magasin, un par mois, ou à la suite.</span></li>
+    </ul>
+  </section>
+  <input type="file" id="choixFichier" class="vh" accept=".csv,.txt,.tsv,text/csv,text/plain" tabindex="-1" aria-hidden="true">
+
+  <div id="atelier" hidden>
+    <section class="carte fiche" aria-label="Fichier à découper">
+      <span class="fiche-ic"><svg class="ic" aria-hidden="true"><use href="#i-fichier"/></svg></span>
+      <div class="fiche-corps">
+        <h2 class="fiche-nom" id="fNom"></h2>
+        <p class="fiche-infos" id="fInfos"></p>
+      </div>
+      <span class="verdict" id="fVerdict"></span>
+      <button type="button" class="btn btn-secondaire" id="btnChanger">Changer de fichier</button>
+      <p class="bandeau" id="bandeau" hidden><span id="bandeauTexte"></span> <button type="button" class="btn-lien" id="btnZero">Repartir de zéro</button></p>
+    </section>
+
+    <div id="etapes">
+      <section class="carte" aria-labelledby="t1">
+        <header class="etape-tete"><span class="numero" aria-hidden="true">1</span><div><h2 id="t1">Colonnes à garder</h2><p class="resume" id="r1"></p></div></header>
+        <details class="pliant" id="choixColonnes">
+          <summary>Choisir les colonnes</summary>
+          <div class="pliant-corps">
+            <div class="outils">
+              <input type="search" id="chercheCol" placeholder="Chercher une colonne" aria-label="Chercher une colonne">
+              <button type="button" class="btn btn-secondaire" id="colTout">Tout garder</button>
+              <button type="button" class="btn btn-secondaire" id="colRien">Tout retirer</button>
+            </div>
+            <div class="grille-col" id="grilleCol"></div>
+          </div>
+        </details>
+        <div class="apercu-zone" id="apercuZone" tabindex="0" aria-label="Aperçu du fichier"><table class="apercu" id="apercu"></table></div>
+        <p class="legende" id="legendeApercu"></p>
+      </section>
+
+      <section class="carte" aria-labelledby="t2">
+        <header class="etape-tete"><span class="numero" aria-hidden="true">2</span><div><h2 id="t2">Lignes à garder</h2><p class="resume" id="r2"></p></div></header>
+        <div class="filtres" id="filtres"></div>
+        <div class="filtres-pied">
+          <button type="button" class="btn btn-secondaire" id="ajoutFiltre"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg> Ajouter un filtre</button>
+          <label id="blocLogique" hidden>Garder les lignes qui respectent
+            <select id="logique"><option value="et">tous les filtres</option><option value="ou">au moins un filtre</option></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="carte" aria-labelledby="t3">
+        <header class="etape-tete"><span class="numero" aria-hidden="true">3</span><div><h2 id="t3">Répartition dans les fichiers</h2><p class="resume" id="r3"></p></div></header>
+        <div class="choix" role="radiogroup" aria-label="Façon de répartir les lignes">
+          <label class="choix-carte"><input type="radio" name="par" value="suite"><b>À la suite</b><span>Dans l’ordre du fichier, un fichier après l’autre</span></label>
+          <label class="choix-carte"><input type="radio" name="par" value="colonne"><b>Par valeur d’une colonne</b><span>Un fichier par magasin, par statut…</span></label>
+          <label class="choix-carte" id="cartePeriode"><input type="radio" name="par" value="periode"><b>Par période</b><span id="descPeriode">Un fichier par mois, trimestre ou année</span></label>
+        </div>
+        <div class="reglages">
+          <label class="champ" id="chColonne" hidden>Colonne <select id="colonne"></select></label>
+          <label class="champ" id="chDate" hidden>Colonne de date <select id="colDate"></select></label>
+          <label class="champ" id="chGran" hidden>Un fichier par
+            <select id="gran"><option value="mois">mois</option><option value="trimestre">trimestre</option><option value="annee">année</option></select>
+          </label>
+          <label class="champ">Taille maximale d’un fichier
+            <select id="limite">
+              <option value="excel">Ce qu’Excel ouvre (1 048 576 lignes)</option>
+              <option value="pj">Une pièce jointe (10 Mo)</option>
+              <option value="lignes">Un nombre de lignes…</option>
+              <option value="mo">Une taille en Mo…</option>
+              <option value="aucune">Pas de limite</option>
+            </select>
+          </label>
+          <label class="champ" id="chValeur" hidden><span id="lblValeur">Lignes par fichier</span>
+            <input type="number" id="limiteValeur" min="0.1" step="any" aria-describedby="limiteErr">
+            <span class="erreur" id="limiteErr" role="alert" hidden></span>
+          </label>
+        </div>
+        <p class="aide" id="aideLimite"></p>
+        <details class="pliant options">
+          <summary>Options des fichiers produits</summary>
+          <div class="pliant-corps">
+            <label class="champ">Encodage
+              <select id="encodage"><option value="source">Comme le fichier d’origine</option><option value="windows-1252">Windows-1252 (Excel en français)</option><option value="utf-8">UTF-8</option></select>
+            </label>
+            <label class="coche"><input type="checkbox" id="entete" checked> <span>Garder la ligne de titres en tête de chaque fichier</span></label>
+          </div>
+        </details>
+      </section>
+    </div>
+
+    <section class="carte" id="cartePlan" aria-labelledby="tPlan">
+      <header class="plan-tete">
+        <div><h2 id="tPlan">Ce que tu vas obtenir</h2><p class="resume" id="rPlan"></p></div>
+        <span class="etat" id="planEtat"></span>
+      </header>
+      <div class="resultat" id="resultat" hidden></div>
+      <div id="planCorps"></div>
+    </section>
+  </div>
+</main>
+
+<div class="action" id="action" hidden>
+  <div class="action-in">
+    <div class="action-texte">
+      <p class="action-titre" id="aTitre"></p>
+      <p class="action-detail" id="aDetail"></p>
+      <div class="jauge" id="jauge" hidden><i id="jaugeBarre"></i></div>
+    </div>
+    <div class="action-boutons">
+      <button type="button" class="btn btn-secondaire btn-grand" id="btnZip"></button>
+      <button type="button" class="btn btn-primaire btn-grand" id="btnDossier"></button>
+      <button type="button" class="btn btn-danger btn-grand" id="btnArreter" hidden>Arrêter</button>
+    </div>
+  </div>
+</div>
+<p class="vh" id="annonce" role="status" aria-live="polite"></p>
+<p class="toast" id="toast" role="alert" hidden></p>
+
+<div class="menu" id="menuCol" role="menu" hidden>
+  <button type="button" role="menuitem" data-a="decouper"><svg class="ic" aria-hidden="true"><use href="#i-ciseaux"/></svg> Un fichier par valeur de cette colonne</button>
+  <button type="button" role="menuitem" data-a="filtrer"><svg class="ic" aria-hidden="true"><use href="#i-filtre"/></svg> Choisir les valeurs à garder</button>
+  <button type="button" role="menuitem" data-a="retirer"><svg class="ic" aria-hidden="true"><use href="#i-croix"/></svg> Retirer cette colonne</button>
+</div>
+
+<dialog id="dlgValeurs" aria-labelledby="dvTitre">
+  <div class="dlg">
+    <header><h2 id="dvTitre"></h2><button type="button" class="btn btn-discret btn-icone" id="dvFermer" aria-label="Fermer"><svg class="ic" aria-hidden="true"><use href="#i-croix"/></svg></button></header>
+    <div class="dlg-outils">
+      <input type="search" id="dvCherche" placeholder="Chercher une valeur" aria-label="Chercher une valeur">
+      <button type="button" class="btn btn-secondaire" id="dvTout">Tout cocher</button>
+      <button type="button" class="btn btn-secondaire" id="dvRien">Tout décocher</button>
+    </div>
+    <p class="dlg-info" id="dvInfo" role="status"></p>
+    <div class="dlg-liste" id="dvListe"></div>
+    <footer>
+      <button type="button" class="btn btn-secondaire" id="dvAnnuler">Annuler</button>
+      <button type="button" class="btn btn-primaire" id="dvValider">Valider</button>
+    </footer>
+  </div>
+</dialog>
+
+<dialog id="dlgRecettes" aria-labelledby="drTitre">
+  <div class="dlg">
+    <header><h2 id="drTitre">Mes recettes</h2><button type="button" class="btn btn-discret btn-icone" id="drFermer" aria-label="Fermer"><svg class="ic" aria-hidden="true"><use href="#i-croix"/></svg></button></header>
+    <p class="dlg-info">Une recette retient tes réglages (colonnes, filtres, répartition) pour les rejouer sur le prochain fichier.</p>
+    <div class="dlg-bloc" id="drAjout">
+      <input type="text" id="drNom" maxlength="80" placeholder="Nom de la recette, par exemple « DR par magasin »" aria-label="Nom de la nouvelle recette">
+      <button type="button" class="btn btn-primaire" id="drEnregistrer">Enregistrer mes réglages</button>
+    </div>
+    <p class="dlg-info" id="drInfo" role="status"></p>
+    <div class="dlg-liste" id="drListe"></div>
+    <footer>
+      <button type="button" class="btn btn-secondaire" id="drImporter">Importer…</button>
+      <button type="button" class="btn btn-secondaire" id="drExporter">Exporter</button>
+      <input type="file" id="drFichier" class="vh" accept=".json,application/json" tabindex="-1" aria-hidden="true">
+    </footer>
+  </div>
+</dialog>
+
+<div class="voile" id="voile" hidden><div>Dépose le fichier pour le découper</div></div>
+<script>
+(function(){
+'use strict';
+var App = window.App = {};
+var $ = function(id){ return document.getElementById(id); };
+
+/* ============================================================
+   LOGIQUE PURE — début  (testable hors navigateur)
+   ============================================================ */
+var MO = 1048576, LIGNES_EXCEL = 1048576, MAX_FICHIERS = 20000, VERSION_SCHEMA = 1;
+var REGLAGES = { bloc:4 * MO, blocPlan:2 * MO, echantillon:2 * MO, seuil:MO, tampon:48 * MO, ouverts:200, memoire:1024 * MO, ligneMax:64 * MO };
+function erreur(code){ var e = new Error(code); e.code = code; return e; }
+
+/* ----- Texte ----- */
+function fmtN(n){ return Math.round(n).toLocaleString('fr-FR').replace(/[   ]/g, ' '); }
+function fmtTaille(b){
+  var u = ['octets', 'Ko', 'Mo', 'Go', 'To'], i = 0;
+  while (b >= 1024 && i < 4){ b /= 1024; i++; }
+  var d = (i === 0 || b >= 100) ? 0 : (b >= 10 ? 1 : 2);
+  return b.toLocaleString('fr-FR', {maximumFractionDigits:d}).replace(/[   ]/g, ' ') + ' ' + u[i];
+}
+function pluriel(n, mot, plur){ return fmtN(n) + ' ' + (n > 1 ? (plur || mot + 's') : mot); }
+function norm(s){ return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim(); }
+function pad(n, w){ var s = String(n); while (s.length < w) s = '0' + s; return s; }
+/* Une valeur devient un morceau de nom de fichier valable partout */
+function sur(s){ var t = String(s).trim().replace(/[\\\/:*?"<>|\s\x00-\x1f]+/g, '-').slice(0, 80).replace(/^-+|-+$/g, ''); return t || 'vide'; }
+function baseNom(nom){ return String(nom).replace(/\.[^.]+$/, '').slice(0, 120) || 'fichier'; }
+/* Deux fichiers ne portent jamais le même nom, casse ignorée (Windows et macOS les confondraient) */
+function nommeur(){
+  var tiges = Object.create(null), pris = Object.create(null);
+  return {
+    tige: function(t){ var c = t, k = 1; while (tiges[c.toLowerCase()]){ k++; c = t + '-' + k; } tiges[c.toLowerCase()] = true; return c; },
+    nom: function(tige, suffixe){
+      var n = tige + suffixe + '.csv', k = 1;
+      while (pris[n.toLowerCase()]){ k++; n = tige + '-' + k + suffixe + '.csv'; }
+      pris[n.toLowerCase()] = true;
+      return n;
+    }
+  };
+}
+
+/* ----- Lecture du CSV ----- */
+/* Un guillemet n'ouvre un champ que s'il est en tête de champ ; un champ entre guillemets
+   peut contenir le séparateur ou des retours à la ligne. */
+function analyserTexte(txt, d){
+  var lignes = [], ligne = [], cur = '', q = false, debut = true;
+  function finChamp(){ ligne.push(cur); cur = ''; debut = true; }
+  function finLigne(){ finChamp(); lignes.push(ligne); ligne = []; }
+  for (var i = 0; i < txt.length; i++){
+    var ch = txt[i];
+    if (q){
+      if (ch === '"'){ if (txt[i + 1] === '"'){ cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    }
+    else if (ch === '"' && debut){ q = true; debut = false; }
+    else if (ch === d) finChamp();
+    else if (ch === '\n' || ch === '\r'){ if (ch === '\r' && txt[i + 1] === '\n') i++; finLigne(); }
+    else { cur += ch; debut = false; }
+  }
+  if (cur !== '' || ligne.length || !debut) finLigne();
+  return lignes;
+}
+function ligneVide(l){ return l.length === 1 && l[0].trim() === ''; }
+function detecterSeparateur(txt){
+  var debut = txt.slice(0, 65536), best = ';', max = 0;
+  [';', ',', '\t', '|'].forEach(function(c){
+    var l = analyserTexte(debut, c).filter(function(x){ return !ligneVide(x); })[0], n = l ? l.length : 0;
+    if (n > max){ max = n; best = c; }
+  });
+  return best;
+}
+/* Première fin d'enregistrement hors guillemets : c'est celle qu'on réécrit dans les fichiers produits */
+function finDeLigne(txt, d){
+  var q = false, debut = true;
+  for (var i = 0; i < txt.length; i++){
+    var ch = txt[i];
+    if (q){ if (ch === '"'){ if (txt[i + 1] === '"') i++; else q = false; } }
+    else if (ch === '"' && debut){ q = true; debut = false; }
+    else if (ch === d) debut = true;
+    else if (ch === '\n') return '\n';
+    else if (ch === '\r') return txt[i + 1] === '\n' ? '\r\n' : '\r';
+    else debut = false;
+  }
+  return '\r\n';
+}
+/* Deux colonnes de même nom deviennent « Nom », « Nom (2) »… pour rester distinguables */
+function nomsUniques(noms){
+  var pris = Object.create(null);
+  return noms.map(function(n){
+    var c = n, k = 1;
+    while (pris[c]){ k++; c = n + ' (' + k + ')'; }
+    pris[c] = true;
+    return c;
+  });
+}
+/* Texte d'un champ écrit entre guillemets */
+function sansGuillemets(t){
+  var out = '', i = 1;
+  for (; i < t.length; i++){
+    var ch = t[i];
+    if (ch === '"'){ if (t[i + 1] === '"'){ out += '"'; i++; } else { i++; break; } }
+    else out += ch;
+  }
+  return out + t.slice(i);
+}
+var MOIS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+function cleMois(v, nomCol){
+  var s = String(v).trim(), m;
+  if ((m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})/))) return m[3] + '-' + pad(+m[2], 2);
+  if ((m = s.match(/^(\d{4})-(\d{2})-(\d{2})/))) return m[1] + '-' + m[2];
+  if (/date|created|cr[ée]/i.test(nomCol) && /^\d{5}(\.\d+)?$/.test(s)){      // date au format numérique d'Excel
+    var n = parseFloat(s);
+    if (n > 20000 && n < 80000){ var d = new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1, 2); }
+  }
+  return null;
+}
+function regrouperPar(cle, g){
+  var y = cle.slice(0, 4), mo = +cle.slice(5, 7);
+  if (g === 'annee') return y;
+  if (g === 'trimestre') return y + '-T' + Math.ceil(mo / 3);
+  return cle;
+}
+function libelleGroupe(v, par){
+  if (par === 'periode'){
+    if (v === 'sans date') return 'Sans date';
+    if (/^\d{4}$/.test(v)) return 'Année ' + v;
+    if (/-T\d$/.test(v)) return v.slice(-2) + ' ' + v.slice(0, 4);
+    return MOIS[+v.slice(5, 7) - 1] + ' ' + v.slice(0, 4);
+  }
+  return v === '' ? '(vide)' : v;
+}
+/* Analyse du début du fichier : encodage, séparateur, colonnes, premières lignes */
+function analyserEchantillon(u8, entier){
+  if ((u8[0] === 0xFF && u8[1] === 0xFE) || (u8[0] === 0xFE && u8[1] === 0xFF) || u8.subarray(0, 4096).indexOf(0) >= 0) throw erreur('binaire');
+  var bom = u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF, fin = u8.length;
+  if (!entier){ var k = u8.lastIndexOf(10); if (k > 0) fin = k + 1; }
+  var octets = u8.subarray(0, fin), enc = 'utf-8', txt;
+  try { txt = new TextDecoder('utf-8', {fatal:true}).decode(octets); }
+  catch (e){ enc = 'windows-1252'; txt = new TextDecoder('windows-1252').decode(octets); }
+  var sep = detecterSeparateur(txt);
+  var lignes = analyserTexte(txt, sep).filter(function(l){ return !ligneVide(l); });
+  if (lignes.length < 2) throw erreur('vide');
+  var noms = nomsUniques(lignes[0].map(function(h, i){ return h.trim() || ('Colonne ' + (i + 1)); }));
+  var rows = lignes.slice(1);
+  var cols = noms.map(function(nom, ci){
+    var vus = Object.create(null), nb = 0, dates = 0, nonVides = 0;
+    for (var r = 0; r < rows.length; r++){
+      var v = rows[r][ci] == null ? '' : String(rows[r][ci]).trim();
+      if (v !== '' && nonVides < 400){ nonVides++; if (cleMois(v, nom)) dates++; }
+      if (nb <= 5000 && !(v in vus)){ vus[v] = 1; nb++; }
+    }
+    return { nom:nom, idx:ci, distinct:nb, date:nonVides > 5 && dates / nonVides > 0.6 };
+  });
+  return { encodage:enc, bom:bom, sep:sep, finLigne:finDeLigne(txt, sep), cols:cols, rows:rows, octetsParLigne:fin / lignes.length };
+}
+
+/* ----- Encodages ----- */
+var DEC_1252 = null, VERS_1252 = null, SURPLUS_UTF8 = null;
+function tables1252(){
+  if (DEC_1252) return;
+  DEC_1252 = new TextDecoder('windows-1252');
+  VERS_1252 = Object.create(null); SURPLUS_UTF8 = new Uint8Array(256);
+  for (var b = 128; b < 256; b++){
+    var c = DEC_1252.decode(new Uint8Array([b])).charCodeAt(0);
+    VERS_1252[c] = b;
+    SURPLUS_UTF8[b] = c < 0x800 ? 1 : 2;      // octets en plus une fois le caractère écrit en UTF-8
+  }
+}
+function encoder1252(txt, bilan){
+  var out = new Uint8Array(txt.length), n = 0;
+  for (var i = 0; i < txt.length; i++){
+    var c = txt.charCodeAt(i);
+    if (c < 128 || (c >= 160 && c < 256)) out[n++] = c;
+    else if (VERS_1252[c] !== undefined) out[n++] = VERS_1252[c];
+    else { if (c >= 0xD800 && c < 0xDC00) i++; out[n++] = 63; bilan.remplaces++; }
+  }
+  return out.subarray(0, n);
+}
+/* Taille d'un morceau une fois converti. sens 1 : Windows-1252 vers UTF-8 ; sens 2 : UTF-8 vers Windows-1252 */
+function longueurSortie(buf, a, b, sens){
+  var n = 0, i;
+  if (sens === 1){ n = b - a; for (i = a; i < b; i++) if (buf[i] > 127) n += SURPLUS_UTF8[buf[i]]; }
+  else for (i = a; i < b; i++) if ((buf[i] & 0xC0) !== 0x80) n++;
+  return n;
+}
+function decodeurChamps(encodage){
+  tables1252();
+  if (encodage !== 'utf-8') return function(u8){ return DEC_1252.decode(u8); };
+  var strict = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true});
+  return function(u8){ try { return strict.decode(u8); } catch (e){ return DEC_1252.decode(u8); } };
+}
+function joindre(a, b){ var t = new Uint8Array(a.length + b.length); t.set(a); t.set(b, a.length); return t; }
+
+/* ----- Réglages, recettes, stockage ----- */
+var OPS = { parmi:'est', horsde:'n’est pas', contient:'contient', necontientpas:'ne contient pas', vide:'est vide', nonvide:'n’est pas vide' };
+function configParDefaut(){
+  return { colonnes:null, filtres:[], logique:'et', par:'suite', colonne:'', colDate:'', gran:'mois',
+           limite:{type:'excel', valeur:0}, entete:true, encodage:'source' };
+}
+function chaine(x, max){ return typeof x === 'string' ? x.slice(0, max || 500) : ''; }
+function nettoyerLimite(l){
+  var types = ['excel', 'pj', 'lignes', 'mo', 'aucune'], t = l && types.indexOf(l.type) >= 0 ? l.type : 'excel';
+  var v = l ? +l.valeur : NaN;
+  if (t === 'lignes') v = isFinite(v) && v >= 1 ? Math.round(v) : 500000;
+  else if (t === 'mo') v = isFinite(v) && v >= 0.1 ? v : 10;
+  else v = 0;
+  return { type:t, valeur:v };
+}
+function nettoyerFiltre(f){
+  if (!f || typeof f !== 'object' || !(f.op in OPS)) return null;
+  return { col:chaine(f.col), op:f.op,
+           valeurs:Array.isArray(f.valeurs) ? f.valeurs.filter(function(v){ return typeof v === 'string'; }).slice(0, 50000) : [],
+           texte:chaine(f.texte) };
+}
+/* Remet d'aplomb n'importe quelle configuration lue (stockage, import) */
+function nettoyerConfig(c){
+  var d = configParDefaut();
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return d;
+  if (Array.isArray(c.colonnes)) d.colonnes = c.colonnes.filter(function(v){ return typeof v === 'string'; }).slice(0, 5000);
+  if (Array.isArray(c.filtres)) d.filtres = c.filtres.map(nettoyerFiltre).filter(Boolean).slice(0, 50);
+  if (c.logique === 'ou') d.logique = 'ou';
+  if (['suite', 'colonne', 'periode'].indexOf(c.par) >= 0) d.par = c.par;
+  d.colonne = chaine(c.colonne); d.colDate = chaine(c.colDate);
+  if (['mois', 'trimestre', 'annee'].indexOf(c.gran) >= 0) d.gran = c.gran;
+  d.limite = nettoyerLimite(c.limite);
+  if (c.entete === false) d.entete = false;
+  if (['source', 'utf-8', 'windows-1252'].indexOf(c.encodage) >= 0) d.encodage = c.encodage;
+  return d;
+}
+function storeParDefaut(){ return { schemaVersion:VERSION_SCHEMA, theme:'clair', recettes:[], derniere:null, pref:{ limite:{type:'excel', valeur:0}, encodage:'source', entete:true } }; }
+/* Lit un stockage de n'importe quelle version (ou corrompu) et rend un stockage valide. Idempotent. */
+function migrer(brut){
+  var s = storeParDefaut();
+  if (!brut || typeof brut !== 'object' || Array.isArray(brut)) return s;
+  if (brut.theme === 'sombre') s.theme = 'sombre';
+  if (Array.isArray(brut.recettes)) brut.recettes.forEach(function(r, i){
+    if (!r || typeof r !== 'object') return;
+    var nom = chaine(r.nom, 80).trim();
+    if (!nom) return;
+    s.recettes.push({ id:chaine(r.id, 40) || ('r' + i + '-' + nom.length), nom:nom, cree:chaine(r.cree, 40), config:nettoyerConfig(r.config) });
+  });
+  s.recettes = s.recettes.slice(0, 200);
+  if (brut.derniere && typeof brut.derniere === 'object' && typeof brut.derniere.signature === 'string')
+    s.derniere = { signature:brut.derniere.signature.slice(0, 200000), config:nettoyerConfig(brut.derniere.config) };
+  if (brut.pref && typeof brut.pref === 'object'){
+    s.pref.limite = nettoyerLimite(brut.pref.limite);
+    if (['source', 'utf-8', 'windows-1252'].indexOf(brut.pref.encodage) >= 0) s.pref.encodage = brut.pref.encodage;
+    if (brut.pref.entete === false) s.pref.entete = false;
+  }
+  return s;
+}
+function signature(cols){ return cols.map(function(c){ return c.nom; }).join('\u0001'); }
+function filtreActif(f){
+  if (!f.col) return false;
+  if (f.op === 'parmi' || f.op === 'horsde') return f.valeurs.length > 0;
+  if (f.op === 'contient' || f.op === 'necontientpas') return norm(f.texte) !== '';
+  return true;
+}
+/* Adapte une configuration à un fichier : ce qui vise une colonne absente est retiré, et signalé */
+function adapter(cfg, cols){
+  var c = nettoyerConfig(cfg), noms = Object.create(null), absents = [];
+  cols.forEach(function(x){ noms[x.nom] = true; });
+  function absent(n){ if (n && absents.indexOf(n) < 0) absents.push(n); }
+  if (c.colonnes){
+    c.colonnes.forEach(function(n){ if (!noms[n]) absent(n); });
+    c.colonnes = c.colonnes.filter(function(n){ return noms[n]; });
+    if (!c.colonnes.length || c.colonnes.length === cols.length) c.colonnes = null;
+  }
+  c.filtres = c.filtres.filter(function(f){ if (noms[f.col]) return true; absent(f.col); return false; });
+  if (c.par === 'colonne' && !noms[c.colonne]){ absent(c.colonne); c.par = 'suite'; }
+  if (c.par === 'periode' && !noms[c.colDate]){ absent(c.colDate); c.par = 'suite'; }
+  if (!noms[c.colonne]) c.colonne = '';
+  if (!noms[c.colDate]) c.colDate = '';
+  return { config:c, absents:absents };
+}
+/* Traduit la configuration en consignes pour le moteur, pour un fichier donné */
+function resoudre(cfg, F){
+  var parNom = Object.create(null), R = { proj:null, filtres:[], ou:cfg.logique === 'ou', par:cfg.par, cle:null, gran:cfg.gran,
+                                         limL:Infinity, limO:Infinity, entete:cfg.entete !== false, cible:cfg.encodage === 'source' ? F.encodage : cfg.encodage, bloquant:null };
+  F.cols.forEach(function(c){ parNom[c.nom] = c; });
+  if (cfg.colonnes){
+    var garde = F.cols.filter(function(c){ return cfg.colonnes.indexOf(c.nom) >= 0; });
+    if (!garde.length) R.bloquant = 'Garde au moins une colonne.';
+    else if (garde.length < F.cols.length) R.proj = garde.map(function(c){ return c.idx; });
+  }
+  cfg.filtres.forEach(function(f){
+    var c = parNom[f.col];
+    if (!c || !filtreActif(f)) return;
+    var r = { idx:c.idx, op:f.op, memo:new Map() };
+    if (f.op === 'parmi' || f.op === 'horsde') r.set = new Set(f.valeurs);
+    else if (f.op === 'contient' || f.op === 'necontientpas') r.texte = norm(f.texte);
+    R.filtres.push(r);
+  });
+  if (cfg.par === 'colonne'){
+    if (parNom[cfg.colonne]) R.cle = { idx:parNom[cfg.colonne].idx, nom:cfg.colonne };
+    else R.bloquant = R.bloquant || 'Choisis la colonne qui sert à répartir les lignes.';
+  } else if (cfg.par === 'periode'){
+    if (parNom[cfg.colDate]) R.cle = { idx:parNom[cfg.colDate].idx, nom:cfg.colDate };
+    else R.bloquant = R.bloquant || 'Choisis la colonne de date.';
+  }
+  var l = cfg.limite;
+  if (l.type === 'excel') R.limL = LIGNES_EXCEL - (R.entete ? 1 : 0);
+  else if (l.type === 'pj') R.limO = 10 * MO;
+  else if (l.type === 'lignes'){ if (isFinite(l.valeur) && l.valeur >= 1) R.limL = Math.round(l.valeur); else R.bloquant = R.bloquant || 'Indique un nombre de lignes d’au moins 1.'; }
+  else if (l.type === 'mo'){ if (isFinite(l.valeur) && l.valeur >= 0.1) R.limO = l.valeur * MO; else R.bloquant = R.bloquant || 'Indique une taille d’au moins 0,1 Mo.'; }
+  return R;
+}
+function teste(c, v){
+  var t = v.trim();
+  switch (c.op){
+    case 'parmi': return c.set.has(t);
+    case 'horsde': return !c.set.has(t);
+    case 'contient': return norm(t).indexOf(c.texte) >= 0;
+    case 'necontientpas': return norm(t).indexOf(c.texte) < 0;
+    case 'vide': return t === '';
+    case 'nonvide': return t !== '';
+  }
+  return true;
+}
+/* Une ligne de l'aperçu (déjà découpée en champs) passe-t-elle les filtres ? */
+function ligneGardee(row, R){
+  if (!R.filtres.length) return true;
+  for (var i = 0; i < R.filtres.length; i++){
+    var c = R.filtres[i], ok = teste(c, row[c.idx] == null ? '' : String(row[c.idx]));
+    if (R.ou && ok) return true;
+    if (!R.ou && !ok) return false;
+  }
+  return !R.ou;
+}
+
+/* ----- Phrases ----- */
+function listeCourte(vals, max){
+  var v = vals.map(function(x){ return x === '' ? '(vide)' : x; });
+  return v.length <= max ? v.join(', ') : v.slice(0, max).join(', ') + ' et ' + pluriel(v.length - max, 'autre');
+}
+function phraseFiltre(f){
+  if (f.op === 'parmi' || f.op === 'horsde') return '« ' + f.col + ' » ' + OPS[f.op] + ' ' + listeCourte(f.valeurs, 3);
+  if (f.op === 'contient' || f.op === 'necontientpas') return '« ' + f.col + ' » ' + OPS[f.op] + ' « ' + f.texte.trim() + ' »';
+  return '« ' + f.col + ' » ' + OPS[f.op];
+}
+function phraseLimite(l){
+  if (l.type === 'excel') return fmtN(LIGNES_EXCEL) + ' lignes au plus par fichier (Excel)';
+  if (l.type === 'pj') return '10 Mo au plus par fichier';
+  if (l.type === 'lignes') return pluriel(l.valeur, 'ligne') + ' au plus par fichier';
+  if (l.type === 'mo') return String(l.valeur).replace('.', ',') + ' Mo au plus par fichier';
+  return 'sans limite de taille';
+}
+function phraseRepartition(cfg){
+  var gran = { mois:'mois', trimestre:'trimestre', annee:'année' }[cfg.gran];
+  if (cfg.par === 'colonne') return 'Un fichier par valeur de « ' + (cfg.colonne || '…') + ' »';
+  if (cfg.par === 'periode') return 'Un fichier par ' + gran + ' selon « ' + (cfg.colDate || '…') + ' »';
+  return cfg.limite.type === 'aucune' ? 'Un seul fichier' : 'Des fichiers à la suite';
+}
+function resumeConfig(cfg){
+  var p = [], actifs = cfg.filtres.filter(filtreActif);
+  if (cfg.colonnes) p.push(pluriel(cfg.colonnes.length, 'colonne'));
+  if (actifs.length) p.push(pluriel(actifs.length, 'filtre'));
+  p.push(phraseRepartition(cfg).replace(/^Un/, 'un').replace(/^Des/, 'des'));
+  if (!(cfg.par === 'suite' && cfg.limite.type === 'aucune')) p.push(phraseLimite(cfg.limite));
+  return p.join(' · ');
+}
+/* Compte rendu écrit à côté des fichiers produits */
+function recapitulatif(F, cfg, res, lieu, date){
+  var L = [], actifs = cfg.filtres.filter(filtreActif), nCols = cfg.colonnes ? cfg.colonnes.length : F.cols.length, b = res.bilan;
+  var large = res.lots.reduce(function(m, l){ return Math.max(m, l.nom.length); }, 0);
+  function droite(s, w){ s = String(s); while (s.length < w) s = ' ' + s; return s; }
+  function gauche(s, w){ s = String(s); while (s.length < w) s += ' '; return s; }
+  function net(s){ return s.replace(/ /g, ' '); }
+  L.push('ALLOTIR - récapitulatif du découpage', 'Date : ' + date, '');
+  L.push('Fichier d’origine : ' + F.nom + ' (' + fmtTaille(F.taille) + ', ' + pluriel(b.lues, 'ligne') + ', ' + pluriel(F.cols.length, 'colonne') + ')', '');
+  L.push('Critères');
+  L.push('- Colonnes : ' + (cfg.colonnes ? nCols + ' gardées sur ' + F.cols.length + ' : ' + cfg.colonnes.join(', ') : 'toutes (' + F.cols.length + ')'));
+  if (actifs.length){
+    L.push('- Lignes gardées : celles qui respectent ' + (actifs.length > 1 ? (cfg.logique === 'ou' ? 'au moins un des filtres' : 'tous les filtres') : 'le filtre'));
+    actifs.forEach(function(f){ L.push('    ' + (f.op === 'parmi' || f.op === 'horsde' ? '« ' + f.col + ' » ' + OPS[f.op] + ' ' + listeCourte(f.valeurs, 1000) : phraseFiltre(f))); });
+  } else L.push('- Lignes gardées : toutes');
+  L.push('- Répartition : ' + phraseRepartition(cfg) + ', ' + phraseLimite(cfg.limite));
+  L.push('- Encodage : ' + (res.cible === 'utf-8' ? 'UTF-8' : 'Windows-1252') + (cfg.entete !== false ? ' ; ligne de titres en tête de chaque fichier' : ' ; sans ligne de titres'), '');
+  L.push('Résultat : ' + pluriel(res.lots.length, 'fichier') + (lieu ? ' dans ' + lieu : ''));
+  res.lots.forEach(function(l){ L.push('  ' + gauche(l.nom, large) + '  ' + droite(pluriel(l.lignes, 'ligne'), 16) + '  ' + droite(fmtTaille(l.octets), 10)); });
+  L.push('');
+  L.push('Contrôle : ' + pluriel(b.lues, 'ligne') + ' lue' + (b.lues > 1 ? 's' : '') + ', ' + fmtN(b.gardees) + ' gardée' + (b.gardees > 1 ? 's' : '') + ', ' +
+         fmtN(b.lues - b.gardees) + ' écartée' + (b.lues - b.gardees > 1 ? 's' : '') + ' par les filtres ; total des fichiers : ' + pluriel(res.lots.reduce(function(s, l){ return s + l.lignes; }, 0), 'ligne') + '.');
+  if (b.vides) L.push(pluriel(b.vides, 'ligne') + ' vide' + (b.vides > 1 ? 's' : '') + ' du fichier d’origine ignorée' + (b.vides > 1 ? 's' : '') + '.');
+  if (b.remplaces) L.push(pluriel(b.remplaces, 'caractère') + ' sans équivalent en Windows-1252 remplacé' + (b.remplaces > 1 ? 's' : '') + ' par « ? ».');
+  return net(L.join('\r\n')) + '\r\n';
+}
+
+/* ----- ZIP (sans compression : les fichiers y sont rangés tels quels) ----- */
+var CRC = null;
+function crc32(u8, crc){
+  if (!CRC){ CRC = new Uint32Array(256); for (var n = 0; n < 256; n++){ var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; CRC[n] = c; } }
+  crc = ~crc;
+  for (var i = 0; i < u8.length; i++) crc = CRC[(crc ^ u8[i]) & 255] ^ (crc >>> 8);
+  return ~crc >>> 0;
+}
+function zip(entrees, d){
+  var enc = new TextEncoder(), parts = [], central = [], offset = 0, tailleC = 0;
+  d = d || new Date();
+  var heure = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  var jour = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  entrees.forEach(function(l){
+    var nom = enc.encode(l.nom), t = l.pos;
+    var e = new DataView(new ArrayBuffer(30));
+    e.setUint32(0, 0x04034b50, true); e.setUint16(4, 20, true); e.setUint16(6, 0x0800, true);
+    e.setUint16(10, heure, true); e.setUint16(12, jour, true); e.setUint32(14, l.crc, true);
+    e.setUint32(18, t, true); e.setUint32(22, t, true); e.setUint16(26, nom.length, true);
+    var c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+    c.setUint16(12, heure, true); c.setUint16(14, jour, true); c.setUint32(16, l.crc, true);
+    c.setUint32(20, t, true); c.setUint32(24, t, true); c.setUint16(28, nom.length, true); c.setUint32(42, offset, true);
+    parts.push(e.buffer, nom); Array.prototype.push.apply(parts, l.blobs);
+    central.push(c.buffer, nom);
+    offset += 30 + nom.length + t; tailleC += 46 + nom.length;
+  });
+  var f = new DataView(new ArrayBuffer(22));
+  f.setUint32(0, 0x06054b50, true); f.setUint16(8, entrees.length, true); f.setUint16(10, entrees.length, true);
+  f.setUint32(12, tailleC, true); f.setUint32(16, offset, true);
+  return new Blob(parts.concat(central, [f.buffer]), {type:'application/zip'});
+}
+/* Sortie en mémoire : les fichiers sont assemblés, puis téléchargés par l'interface */
+function sortieMemoire(){
+  var plus = [];
+  return {
+    lieu: '',
+    ecrire: async function(lot, u8){
+      if (!lot.blobs){ lot.blobs = []; lot.crc = 0; lot.pos = 0; }
+      lot.crc = crc32(u8, lot.crc); lot.pos += u8.length;
+      lot.blobs.push(new Blob([u8]));
+      if (lot.blobs.length > 64) lot.blobs = [new Blob(lot.blobs)];
+    },
+    fermer: async function(){},
+    taille: async function(lot){ return lot.blobs.reduce(function(s, b){ return s + b.size; }, 0); },
+    ajouter: async function(nom, u8){ plus.push({ nom:nom, blobs:[new Blob([u8])], crc:crc32(u8, 0), pos:u8.length }); },
+    entrees: function(lots){ return lots.concat(plus); },
+    abandonner: async function(){ return true; }
+  };
+}
+
+/* ----- Moteur : lecture par blocs, chaque ligne gardée est recopiée octet pour octet ----- */
+/* Repère les champs d'un enregistrement sans le décoder */
+function lecteurChamps(SEP, dec){
+  var bornes = new Int32Array(64), nSep = 0, B = null, A = 0, E = 0;
+  var L = {
+    lire: function(buf, a, e, guillemets, jusqua){
+      var n = 0, i, c;
+      B = buf; A = a; E = e;
+      if (!guillemets){
+        for (i = a; i < e; i++) if (buf[i] === SEP){
+          if (n === bornes.length){ var g = new Int32Array(n * 2); g.set(bornes); bornes = g; }
+          bornes[n++] = i;
+          if (n > jusqua) break;
+        }
+      } else {
+        var q = false, debut = true;
+        for (i = a; i < e; i++){
+          c = buf[i];
+          if (q){ if (c === 34){ if (i + 1 < e && buf[i + 1] === 34) i++; else q = false; } }
+          else if (c === 34 && debut){ q = true; debut = false; }
+          else if (c === SEP){
+            if (n === bornes.length){ var g2 = new Int32Array(n * 2); g2.set(bornes); bornes = g2; }
+            bornes[n++] = i; debut = true;
+            if (n > jusqua) break;
+          }
+          else debut = false;
+        }
+      }
+      nSep = n;
+    },
+    existe: function(k){ return k <= nSep; },
+    debut: function(k){ return k ? bornes[k - 1] + 1 : A; },
+    fin: function(k){ return k < nSep ? bornes[k] : E; },
+    longueur: function(){ return E - A; },
+    valeur: function(k){
+      if (k > nSep) return '';
+      var s = L.debut(k), f = L.fin(k), t = '';
+      if (B[s] === 34 && f > s) return sansGuillemets(dec(B.subarray(s, f)));
+      for (var i = s; i < f; i++){ var c = B[i]; if (c > 127) return dec(B.subarray(s, f)); t += String.fromCharCode(c); }
+      return t;
+    }
+  };
+  return L;
+}
+/* Parcourt tout le fichier, enregistrement par enregistrement */
+async function parcourir(F, bloc, surLigne, surBloc){
+  var file = F.file, taille = file.size, SEP = F.sep.charCodeAt(0), TERM = F.finLigne === '\r' ? 13 : 10;
+  var pos = F.bom ? 3 : 0, reste = null, fin = false, enteteVu = false, vides = 0;
+  function ligne(buf, a, e, g){
+    var vide = true;
+    for (var i = a; i < e; i++){ var c = buf[i]; if (c !== 32 && c !== 13 && (c !== 9 || SEP === 9)){ vide = false; break; } }
+    if (vide){ if (enteteVu) vides++; return; }
+    if (!enteteVu){ enteteVu = true; surLigne(buf, a, e, g, true); }
+    else surLigne(buf, a, e, g, false);
+  }
+  function traiter(buf, dernier){      // traite les enregistrements complets ; renvoie la position du premier octet non traité
+    var n = buf.length, a = 0, gq = -1;
+    while (a < n){
+      var b = buf.indexOf(TERM, a), guillemets = false;
+      if (gq < a){ gq = buf.indexOf(34, a); if (gq < 0) gq = Infinity; }
+      if (gq < (b < 0 ? n : b)){          // un guillemet dans la ligne : lecture pas à pas
+        guillemets = true;
+        var q = false, debut = true, i = a;
+        for (; i < n; i++){
+          var c = buf[i];
+          if (q){ if (c === 34){ if (buf[i + 1] === 34) i++; else q = false; } }
+          else if (c === 34 && debut){ q = true; debut = false; }
+          else if (c === SEP) debut = true;
+          else if (c === TERM) break;
+          else debut = false;
+        }
+        b = i < n ? i : -1;
+      }
+      var suite = b + 1;
+      if (b < 0){ if (!dernier) return a; b = n; suite = n; }
+      var e = b;
+      if (TERM === 10 && e > a && buf[e - 1] === 13) e--;
+      ligne(buf, a, e, guillemets);
+      a = suite;
+    }
+    return n;
+  }
+  while (!fin){
+    var u8 = new Uint8Array(await file.slice(pos, pos + bloc).arrayBuffer());
+    pos += u8.length;
+    fin = pos >= taille || !u8.length;
+    var buf = reste ? joindre(reste, u8) : u8, k = traiter(buf, fin);
+    reste = k < buf.length ? buf.slice(k) : null;
+    if (reste && reste.length > REGLAGES.ligneMax) throw erreur('ligne');
+    await surBloc(Math.min(pos, taille), taille);
+  }
+  return vides;
+}
+/* Découpe le fichier selon les consignes R. Sans sortie, rien n'est écrit : c'est le calcul exact du plan. */
+async function executer(F, R, sortie, suivi){
+  suivi = suivi || {};
+  var simulation = !sortie, SEP = F.sep.charCodeAt(0);
+  var NL = new Uint8Array(F.finLigne.split('').map(function(c){ return c.charCodeAt(0); }));
+  var sens = R.cible === F.encodage ? 0 : (R.cible === 'utf-8' ? 1 : 2);
+  var bomSortie = R.cible === 'utf-8' && (F.encodage === 'utf-8' ? F.bom : true);
+  tables1252();
+  var dec = decodeurChamps(F.encodage), decLarge = new TextDecoder(F.encodage, {ignoreBOM:true}), encUtf8 = new TextEncoder();
+  var bilan = { lues:0, gardees:0, vides:0, remplaces:0 };
+  function convertir(u8){
+    if (!sens) return u8;
+    var txt = decLarge.decode(u8);
+    return sens === 1 ? encUtf8.encode(txt) : encoder1252(txt, bilan);
+  }
+  var proj = R.proj, nSel = proj ? proj.length : 0, filtres = R.filtres, ou = R.ou, parGroupe = R.par !== 'suite';
+  var maxIdx = parGroupe ? R.cle.idx : -1;
+  filtres.forEach(function(c){ if (c.idx > maxIdx) maxIdx = c.idx; });
+  if (proj) proj.forEach(function(k){ if (k > maxIdx) maxIdx = k; });
+  var L = lecteurChamps(SEP, dec), tmp = new Uint8Array(4096);
+  var base = baseNom(F.nom), N = nommeur(), groupes = new Map(), memoCle = new Map(), lots = [], actifs = [], courant = null;
+  var largeur = Math.max(3, String(suivi.prevus || 0).length), unique = !parGroupe && R.limL === Infinity && R.limO === Infinity;
+  var enteteSortie = null, enAttente = 0;
+
+  function nouveauLot(grp){
+    if (lots.length >= MAX_FICHIERS) throw erreur('exces');
+    var n = lots.length + 1;
+    var lot = { n:n, cle:grp ? grp.cle : null, lib:grp ? grp.lib : 'Fichier ' + n, lignes:0, octets:0, part:1, parts:1, nom:'', etat:simulation ? 'prevu' : 'encours',
+                tampon:simulation ? null : new Uint8Array(4096), nt:0, ecrits:0, commence:false, clos:false };
+    if (grp){
+      grp.lots.push(lot); lot.part = grp.lots.length;
+      grp.lots.forEach(function(l){ l.parts = grp.lots.length; });
+      lot.nom = N.nom(grp.tige, lot.part > 1 ? '_' + lot.part : '');
+    } else lot.nom = N.nom(base + (unique ? '_extrait' : '_' + pad(n, largeur)), '');
+    lot.octets = (bomSortie ? 3 : 0) + (R.entete ? enteteSortie.length : 0);
+    lots.push(lot);
+    if (!simulation) actifs.push(lot);
+    return lot;
+  }
+  function groupeDe(brut){
+    var grp = memoCle.get(brut);
+    if (grp) return grp;
+    var v = brut.trim();
+    if (R.par === 'periode'){ var k = cleMois(v, R.cle.nom); v = k ? regrouperPar(k, R.gran) : 'sans date'; }
+    grp = groupes.get(v);
+    if (!grp){ grp = { cle:v, lib:libelleGroupe(v, R.par), tige:base + '_' + N.tige(sur(v)), lots:[] }; groupes.set(v, grp); }
+    if (memoCle.size < 200000) memoCle.set(brut, grp);
+    return grp;
+  }
+  function gardee(){
+    for (var i = 0; i < filtres.length; i++){
+      var c = filtres[i], v = L.valeur(c.idx), ok = c.memo.get(v);
+      if (ok === undefined){ ok = teste(c, v); if (c.memo.size < 200000) c.memo.set(v, ok); }
+      if (ou && ok) return true;
+      if (!ou && !ok) return false;
+    }
+    return !ou;
+  }
+  /* Colonnes gardées : les champs choisis sont recopiés tels quels, dans l'ordre du fichier */
+  function projeter(buf){
+    var besoin = L.longueur() + nSel, n = 0;
+    if (tmp.length < besoin) tmp = new Uint8Array(besoin * 2);
+    for (var j = 0; j < nSel; j++){
+      if (j) tmp[n++] = SEP;
+      var k = proj[j];
+      if (L.existe(k)){ var s = L.debut(k), f = L.fin(k); tmp.set(buf.subarray(s, f), n); n += f - s; }
+    }
+    return n;
+  }
+  function longueurProjetee(buf){
+    var n = nSel - 1;
+    for (var j = 0; j < nSel; j++){
+      var k = proj[j];
+      if (L.existe(k)){ var s = L.debut(k), f = L.fin(k); n += sens ? longueurSortie(buf, s, f, sens) : f - s; }
+    }
+    return n;
+  }
+  /* Range une ligne gardée dans son fichier, en ouvrant le suivant si celui-ci est plein */
+  function placer(src, a, b, lo){
+    var grp = null, lot;
+    if (parGroupe){ grp = groupeDe(L.valeur(R.cle.idx)); lot = grp.lots[grp.lots.length - 1]; }
+    else lot = courant;
+    if (!lot || lot.lignes >= R.limL || (lot.lignes > 0 && lot.octets + lo > R.limO)){
+      if (lot) lot.clos = true;
+      lot = nouveauLot(grp);
+      if (!parGroupe) courant = lot;
+    }
+    if (!simulation){
+      var besoin = b - a + NL.length;
+      if (lot.nt + besoin > lot.tampon.length){
+        var t = new Uint8Array(Math.max(lot.tampon.length * 2, lot.nt + besoin));
+        t.set(lot.tampon.subarray(0, lot.nt)); lot.tampon = t;
+      }
+      lot.tampon.set(src.subarray(a, b), lot.nt); lot.nt += b - a;
+      lot.tampon.set(NL, lot.nt); lot.nt += NL.length;
+      enAttente += besoin;
+    }
+    lot.lignes++; lot.octets += lo; bilan.gardees++;
+  }
+  function surLigne(buf, a, e, g, estEntete){
+    if (maxIdx >= 0) L.lire(buf, a, e, g, maxIdx);
+    if (estEntete){ enteteSortie = convertir(joindre(proj ? tmp.slice(0, projeter(buf)) : buf.slice(a, e), NL)); return; }
+    bilan.lues++;
+    if (filtres.length && !gardee()) return;
+    var src = buf, s = a, f = e, lo;
+    if (proj){
+      if (simulation) lo = longueurProjetee(buf);
+      else { f = projeter(buf); src = tmp; s = 0; lo = sens ? longueurSortie(tmp, 0, f, sens) : f; }
+    } else lo = sens ? longueurSortie(buf, a, e, sens) : e - a;
+    placer(src, s, f, lo + NL.length);
+  }
+  async function ecrireLot(lot){
+    if (!lot.commence){
+      lot.commence = true;
+      var p = new Uint8Array((bomSortie ? 3 : 0) + (R.entete ? enteteSortie.length : 0));
+      if (bomSortie) p.set([0xEF, 0xBB, 0xBF]);
+      if (R.entete) p.set(enteteSortie, bomSortie ? 3 : 0);
+      if (p.length){ await sortie.ecrire(lot, p); lot.ecrits += p.length; }
+    }
+    var u8 = convertir(lot.tampon.subarray(0, lot.nt));
+    await sortie.ecrire(lot, u8); lot.ecrits += u8.length;
+    enAttente -= lot.nt; lot.nt = 0;
+  }
+  async function vider(tout){
+    var ferme = false;
+    for (var i = 0; i < actifs.length; i++){
+      var lot = actifs[i];
+      if (lot.nt && (tout || lot.clos || lot.nt >= REGLAGES.seuil)) await ecrireLot(lot);
+      if (lot.clos){
+        await sortie.fermer(lot);
+        if (!sens && lot.ecrits !== lot.octets) throw erreur('controle');
+        lot.octets = lot.ecrits; lot.etat = 'ecrit'; lot.tampon = null; ferme = true;
+      }
+    }
+    if (ferme) actifs = actifs.filter(function(l){ return l.etat !== 'ecrit'; });
+  }
+  bilan.vides = await parcourir(F, simulation ? REGLAGES.blocPlan : REGLAGES.bloc, surLigne, async function(lu, total){
+    /* beaucoup de fichiers ouverts à la fois : on vide moins souvent, pour limiter les réouvertures */
+    if (!simulation) await vider(enAttente >= REGLAGES.tampon * (actifs.length > REGLAGES.ouverts ? 4 : 1));
+    if (suivi.annule && suivi.annule()) throw erreur('arret');
+    if (suivi.bloc) await suivi.bloc(lu, total, lots, bilan);
+  });
+  if (!simulation){
+    actifs.forEach(function(l){ l.clos = true; });
+    await vider(true);
+    /* Contrôles : chaque fichier relu fait la taille écrite, et aucune ligne gardée ne manque */
+    var somme = 0;
+    for (var i = 0; i < lots.length; i++){
+      somme += lots[i].lignes;
+      if (await sortie.taille(lots[i]) !== lots[i].ecrits) throw erreur('controle');
+    }
+    if (somme !== bilan.gardees) throw erreur('controle');
+  }
+  return { lots:lots, bilan:bilan, cible:R.cible };
+}
+/* Compte exactement les valeurs d'une colonne, sur tout le fichier */
+async function compterValeurs(F, idx, suivi){
+  var L = lecteurChamps(F.sep.charCodeAt(0), decodeurChamps(F.encodage)), map = new Map(), trop = false, MAXV = 50000;
+  await parcourir(F, REGLAGES.blocPlan, function(buf, a, e, g, estEntete){
+    if (estEntete) return;
+    L.lire(buf, a, e, g, idx);
+    var v = L.valeur(idx).trim(), n = map.get(v);
+    if (n !== undefined) map.set(v, n + 1);
+    else if (map.size < MAXV) map.set(v, 1);
+    else trop = true;
+  }, async function(lu, total){
+    if (suivi && suivi.annule && suivi.annule()) throw erreur('arret');
+    if (suivi && suivi.bloc) await suivi.bloc(lu, total);
+  });
+  return { map:map, trop:trop };
+}
+/* ============================================================
+   LOGIQUE PURE — fin
+   ============================================================ */
+
+/* ==========================================================
+   INTERFACE
+   ========================================================== */
+var CLE = 'fifi.allotir.v1', TITRE_DEPOT = 'Dépose ton fichier CSV ici';
+var NOM_SEP = { ';':'point-virgule', ',':'virgule', '\t':'tabulation', '|':'barre verticale' };
+
+/* ---------- Stockage (peut être absent, plein ou corrompu) ---------- */
+function lsGet(k){ try { return localStorage.getItem(k); } catch (e){ return null; } }
+function lsSet(k, v){ try { localStorage.setItem(k, v); return true; } catch (e){ return false; } }
+function jparse(raw){ try { return JSON.parse(raw); } catch (e){ return null; } }
+var store = migrer(jparse(lsGet(CLE)));
+var tSauve = null;
+function sauver(){ clearTimeout(tSauve); tSauve = setTimeout(sauverMaintenant, 300); }
+function sauverMaintenant(){
+  clearTimeout(tSauve); tSauve = null;
+  if (!lsSet(CLE, JSON.stringify(store)) && !etat.alerteStockage){ etat.alerteStockage = true; dire('Ce navigateur refuse de mémoriser tes réglages et tes recettes.', 'alerte'); }
+}
+
+/* ---------- État : la seule source de vérité, l'affichage en découle ---------- */
+var etat = { F:null, cfg:configParDefaut(), R:null, plan:null, jeton:0, enCours:false, arret:false, dossier:null, resultat:null,
+             valeurs:{}, planOuvert:false, bandeau:null, recetteEnAttente:null, alerteStockage:false, memo:{ lignes:500000, mo:10 } };
+
+/* ---------- Outils ---------- */
+/* Tout le contenu venu du fichier ou de l'utilisateur passe par textContent : aucun HTML n'est assemblé à partir de données */
+function el(tag, props, enfants){
+  var n = document.createElement(tag), k;
+  for (k in (props || {})){
+    var v = props[k];
+    if (v == null || v === false) continue;
+    if (k === 'class') n.className = v;
+    else if (k === 'text') n.textContent = v;
+    else if (k === 'data'){ for (var d in v) n.dataset[d] = v[d]; }
+    else if (k === 'checked' || k === 'disabled' || k === 'value' || k === 'hidden') n[k] = v;
+    else n.setAttribute(k, v === true ? '' : v);
+  }
+  (enfants || []).forEach(function(c){ if (c != null) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+  return n;
+}
+function vider(n){ while (n.firstChild) n.removeChild(n.firstChild); }
+function ic(nom, cls){
+  var NS = document.querySelector('svg').namespaceURI, s = document.createElementNS(NS, 'svg'), u = document.createElementNS(NS, 'use');
+  s.setAttribute('class', 'ic' + (cls ? ' ' + cls : '')); s.setAttribute('aria-hidden', 'true');
+  u.setAttribute('href', '#i-' + nom); s.appendChild(u);
+  return s;
+}
+function remplir(sel, noms, valeur){
+  vider(sel);
+  noms.forEach(function(n){ sel.appendChild(el('option', {value:n, text:n})); });
+  if (noms.indexOf(valeur) >= 0) sel.value = valeur;
+}
+var tToast = null;
+function dire(msg, ton){
+  var t = $('toast');
+  t.textContent = msg; t.className = 'toast' + (ton ? ' ' + ton : ''); t.hidden = false;
+  clearTimeout(tToast); tToast = setTimeout(function(){ t.hidden = true; }, 7000);
+}
+function annoncer(msg){ $('annonce').textContent = msg; }
+function pause(){ return new Promise(function(ok){ setTimeout(ok, 0); }); }
+function colParNom(n){ var c = etat.F.cols; for (var i = 0; i < c.length; i++) if (c[i].nom === n) return c[i]; return null; }
+function colonnesGardees(){
+  var g = new Set(), c = etat.cfg.colonnes;
+  etat.F.cols.forEach(function(x){ if (!c || c.indexOf(x.nom) >= 0) g.add(x.nom); });
+  return g;
+}
+
+/* ---------- Ouverture d'un fichier ---------- */
+function messageAnalyse(e){
+  if (e && e.code === 'vide') return 'Ce fichier ne contient pas de lignes lisibles. Il faut une ligne de titres et au moins une ligne de données.';
+  if (e && e.code === 'binaire') return 'Ce fichier n’est pas un CSV lisible (UTF-16 ou fichier binaire). Enregistre-le en « CSV UTF-8 » ou en « CSV (séparateur : point-virgule) », puis dépose-le de nouveau.';
+  return 'Ce fichier n’a pas pu être lu. Vérifie qu’il est accessible, puis réessaie.';
+}
+function refuser(msg){
+  $('titreDepot').textContent = TITRE_DEPOT;
+  if (etat.F) dire(msg, 'alerte');
+  else { $('erreurDepot').textContent = msg; $('erreurDepot').hidden = false; }
+}
+function colonneProbable(F){
+  var i, c;
+  for (i = 0; i < F.cols.length; i++){ c = F.cols[i]; if (c.distinct >= 2 && c.distinct <= 200 && /magasin|site|d[ée]p[ôo]t|statut|status|service|unit[ée]/i.test(c.nom)) return c.nom; }
+  for (i = 0; i < F.cols.length; i++){ c = F.cols[i]; if (c.distinct >= 2 && c.distinct <= 60) return c.nom; }
+  return F.cols[0].nom;
+}
+/* Réglages de départ : une recette en attente, sinon ceux de la dernière découpe d'un fichier de même structure, sinon les réglages par défaut */
+function choisirConfig(exemple){
+  var F = etat.F, der = store.derniere, c, a;
+  etat.bandeau = null;
+  if (etat.recetteEnAttente){
+    a = adapter(etat.recetteEnAttente.config, F.cols); c = a.config;
+    etat.bandeau = bandeauRecette(etat.recetteEnAttente.nom, a.absents);
+    etat.recetteEnAttente = null; $('texteDepot').textContent = TEXTE_DEPOT;
+  } else if (der && der.signature === F.signature && !exemple){
+    c = adapter(der.config, F.cols).config;
+    etat.bandeau = { texte:'Même structure que la dernière fois : tes réglages ont été repris.' };
+  } else {
+    c = configParDefaut();
+    c.limite = nettoyerLimite(store.pref.limite); c.encodage = store.pref.encodage; c.entete = store.pref.entete;
+    if (exemple){ c.par = 'colonne'; c.colonne = 'Magasin'; }
+  }
+  completer(c);
+  etat.cfg = c;
+}
+function completer(c){
+  var F = etat.F, dates = F.cols.filter(function(x){ return x.date; });
+  if (!c.colonne) c.colonne = colonneProbable(F);
+  if (!c.colDate && dates.length) c.colDate = dates[0].nom;
+  if (c.par === 'periode' && !colParNom(c.colDate)) c.par = 'suite';
+  if (c.limite.type === 'lignes' || c.limite.type === 'mo') etat.memo[c.limite.type] = c.limite.valeur;
+}
+function bandeauRecette(nom, absents){
+  return absents.length ? { alerte:true, texte:'Recette « ' + nom + ' » appliquée, sauf ce qui vise des colonnes absentes de ce fichier : ' + absents.join(', ') + '.' }
+                        : { texte:'Recette « ' + nom + ' » appliquée.' };
+}
+var TEXTE_DEPOT = '';
+async function charger(file, exemple){
+  if (etat.enCours || !file) return;
+  var ext = (file.name.split('.').pop() || '').toLowerCase(), A;
+  if (['xlsx', 'xls', 'xlsm', 'xlsb', 'ods'].indexOf(ext) >= 0) return refuser('Les classeurs Excel ne sont pas lus. Dans Excel, fais « Enregistrer sous », choisis « CSV UTF-8 », puis dépose le fichier CSV obtenu.');
+  $('erreurDepot').hidden = true;
+  if (!etat.F) $('titreDepot').textContent = 'Analyse de ' + file.name + '…';
+  try { A = analyserEchantillon(new Uint8Array(await file.slice(0, REGLAGES.echantillon).arrayBuffer()), file.size <= REGLAGES.echantillon); }
+  catch (e){ return refuser(messageAnalyse(e)); }
+  annulerPlan();
+  var F = etat.F = { file:file, nom:file.name, taille:file.size, exemple:!!exemple, encodage:A.encodage, bom:A.bom, sep:A.sep, finLigne:A.finLigne, cols:A.cols, rows:A.rows,
+                     exact:file.size <= REGLAGES.echantillon, lignes:null, estimation:Math.max(A.rows.length, Math.round(file.size / A.octetsParLigne) - 1) };
+  if (F.exact) F.lignes = A.rows.length;
+  F.signature = signature(F.cols);
+  etat.valeurs = {}; etat.resultat = null; etat.planOuvert = false;
+  choisirConfig(exemple);
+  $('titreDepot').textContent = TITRE_DEPOT;
+  $('accueil').hidden = true; $('atelier').hidden = false; $('action').hidden = false;
+  $('chercheCol').value = ''; $('choixColonnes').open = false;
+  toutRendre(); planifier();
+  window.scrollTo(0, 0);
+  annoncer('Fichier ' + F.nom + ' ouvert : ' + F.cols.length + ' colonnes.');
+}
+/* Un vrai fichier fabriqué en mémoire : l'exemple suit exactement le même chemin qu'un fichier déposé */
+function fichierExemple(){
+  var mags = ['LYO-C', 'ROM-C', 'ORL-C', 'BRE-C', 'TLN-C', 'MTZ-C', 'BDX-C', 'CLF-C'], poids = [25, 20, 15, 12, 10, 8, 6, 4];
+  var statuts = ['En attente', 'Réparable', 'Traité', 'Réforme', 'Annulé'], prio = ['Normale', 'Normale', 'Normale', 'Urgente', 'Immédiate'];
+  var libs = ['Écran 24 pouces', 'Câble réseau 2 m', 'Poste portable', 'Station d’accueil', 'Casque audio', 'Clavier', 'Souris', 'Imprimante laser', 'Commutateur 24 ports', 'Onduleur'];
+  var tirage = [], g = 12345, L = ['N° DR;Date de création;Magasin;NNO;Libellé;Quantité;Statut;Priorité;Demandeur;Observation'];
+  function alea(n){ g = (g * 1103515245 + 12345) & 0x7fffffff; return (g >>> 8) % n; }
+  mags.forEach(function(m, i){ for (var k = 0; k < poids[i]; k++) tirage.push(m); });
+  for (var i = 1; i <= 60000; i++){
+    L.push('DR' + pad(i, 7) + ';' + pad(1 + alea(28), 2) + '/' + pad(1 + Math.floor((i - 1) / 5000), 2) + '/2026;' + tirage[alea(tirage.length)] + ';' + (6100000000000 + alea(900000)) + ';' +
+           libs[alea(libs.length)] + ';' + (1 + alea(40)) + ';' + statuts[alea(statuts.length)] + ';' + prio[alea(prio.length)] + ';Service ' + (1 + alea(12)) + ';' + (alea(9) ? '' : 'À contrôler à réception'));
+  }
+  return new File([L.join('\r\n') + '\r\n'], 'exemple_demandes.csv', {type:'text/csv'});
+}
+
+/* ---------- Rendu ---------- */
+function toutRendre(){
+  etat.R = resoudre(etat.cfg, etat.F);
+  rendreFiche(); rendreColonnes(); rendreFiltres(); rendreRepartition(); rendreApercu(); resumes(); rendrePlan(); rendreAction(); pastille();
+}
+function rendreFiche(){
+  var F = etat.F, n = F.lignes != null ? F.lignes : F.estimation, trop = n + 1 > LIGNES_EXCEL, v = $('fVerdict');
+  $('fNom').textContent = F.nom;
+  $('fInfos').textContent = [fmtTaille(F.taille), (F.lignes != null ? '' : 'environ ') + pluriel(n, 'ligne'), pluriel(F.cols.length, 'colonne'),
+                             F.encodage === 'utf-8' ? 'UTF-8' : 'Windows-1252', 'séparateur ' + (NOM_SEP[F.sep] || F.sep)].join(' · ') + (F.exemple ? ' · données fictives' : '');
+  v.className = 'verdict ' + (trop ? 'trop' : 'bon');
+  vider(v); v.appendChild(ic(trop ? 'alerte' : 'coche')); v.appendChild(document.createTextNode(trop ? 'Trop gros pour Excel' : 'S’ouvre dans Excel'));
+  v.title = trop ? 'Excel n’ouvre que les ' + fmtN(LIGNES_EXCEL) + ' premières lignes d’un fichier.' : 'Le fichier compte moins de ' + fmtN(LIGNES_EXCEL) + ' lignes.';
+  $('bandeau').hidden = !etat.bandeau;
+  if (etat.bandeau){ $('bandeauTexte').textContent = etat.bandeau.texte; $('bandeau').classList.toggle('alerte', !!etat.bandeau.alerte); }
+}
+function rendreColonnes(){
+  var g = $('grilleCol'), q = norm($('chercheCol').value), garde = colonnesGardees();
+  vider(g);
+  etat.F.cols.forEach(function(c){
+    if (q && norm(c.nom).indexOf(q) < 0) return;
+    g.appendChild(el('label', {class:'case', title:c.nom}, [el('input', {type:'checkbox', checked:garde.has(c.nom), data:{idx:c.idx}}), el('span', {text:c.nom})]));
+  });
+  if (!g.firstChild) g.appendChild(el('p', {class:'vide', text:'Aucune colonne ne porte ce nom.'}));
+}
+function fixerColonnes(g){
+  var liste = etat.F.cols.filter(function(c){ return g.has(c.nom); }).map(function(c){ return c.nom; });
+  etat.cfg.colonnes = liste.length === etat.F.cols.length ? null : liste;
+  modifie();
+}
+function rendreApercu(){
+  var F = etat.F, R = etat.R, c = etat.cfg, t = $('apercu'), g = colonnesGardees(), n = 0;
+  var cols = F.cols.filter(function(x){ return g.has(x.nom); }), filtrees = {}, cle = c.par === 'colonne' ? c.colonne : (c.par === 'periode' ? c.colDate : null);
+  vider(t);
+  if (!cols.length){ $('legendeApercu').textContent = 'Aucune colonne gardée : coche au moins une colonne ci-dessus.'; return; }
+  c.filtres.forEach(function(f){ if (filtreActif(f)) filtrees[f.col] = true; });
+  var tr = el('tr');
+  cols.forEach(function(x){
+    var b = el('button', {type:'button', class:'entete', 'aria-haspopup':'menu', data:{idx:x.idx}, title:'Actions sur la colonne « ' + x.nom + ' »'},
+               [x.nom === cle ? ic('ciseaux') : null, filtrees[x.nom] ? ic('filtre') : null, el('span', {text:x.nom}), ic('chevron', 'chevron')]);
+    tr.appendChild(el('th', {scope:'col', class:x.nom === cle ? 'cle' : null}, [b]));
+  });
+  t.appendChild(el('thead', null, [tr]));
+  var corps = el('tbody');
+  for (var i = 0; i < F.rows.length && n < 8; i++){
+    var row = F.rows[i];
+    if (!ligneGardee(row, R)) continue;
+    n++;
+    corps.appendChild(el('tr', null, cols.map(function(x){
+      var v = row[x.idx] == null ? '' : String(row[x.idx]);
+      return el('td', {text:v.length > 120 ? v.slice(0, 120) + '…' : v, title:v.length > 28 ? v.slice(0, 500) : null});
+    })));
+  }
+  t.appendChild(corps);
+  $('legendeApercu').textContent = n ? 'Aperçu des ' + n + ' premières lignes gardées. Clique sur un titre de colonne pour découper ou filtrer selon cette colonne.'
+                                     : 'Aucune ligne du début du fichier ne passe tes filtres.';
+}
+function resumeValeurs(f){ return f.valeurs.length ? listeCourte(f.valeurs, 3) : 'Choisir les valeurs…'; }
+function rendreFiltres(){
+  var z = $('filtres'), c = etat.cfg, noms = etat.F.cols.map(function(x){ return x.nom; });
+  vider(z);
+  if (!c.filtres.length) z.appendChild(el('p', {class:'vide', text:'Aucun filtre : toutes les lignes du fichier sont gardées.'}));
+  c.filtres.forEach(function(f, i){
+    var selCol = el('select', {'aria-label':'Colonne du filtre ' + (i + 1), data:{k:'col'}}), selOp = el('select', {'aria-label':'Condition du filtre ' + (i + 1), data:{k:'op'}}), zone;
+    remplir(selCol, noms, f.col);
+    Object.keys(OPS).forEach(function(o){ selOp.appendChild(el('option', {value:o, text:OPS[o]})); });
+    selOp.value = f.op;
+    if (f.op === 'parmi' || f.op === 'horsde') zone = el('button', {type:'button', class:'btn btn-valeurs' + (f.valeurs.length ? '' : ' manque'), data:{k:'valeurs'}, title:'Choisir les valeurs dans la liste'}, [el('span', {text:resumeValeurs(f)})]);
+    else if (f.op === 'contient' || f.op === 'necontientpas') zone = el('input', {type:'text', value:f.texte, placeholder:'texte à chercher (accents et majuscules ignorés)', 'aria-label':'Texte du filtre ' + (i + 1), data:{k:'texte'}});
+    else zone = el('span', {class:'sans-valeur'});
+    z.appendChild(el('div', {class:'filtre', data:{i:i}}, [selCol, selOp, zone,
+      el('button', {type:'button', class:'btn btn-discret btn-icone', data:{k:'suppr'}, 'aria-label':'Retirer le filtre ' + (i + 1), title:'Retirer ce filtre'}, [ic('croix')])]));
+  });
+  $('blocLogique').hidden = c.filtres.length < 2;
+  $('logique').value = c.logique;
+}
+function rendreRepartition(){
+  var F = etat.F, c = etat.cfg, dates = F.cols.filter(function(x){ return x.date; });
+  document.querySelectorAll('input[name=par]').forEach(function(r){ r.checked = r.value === c.par; });
+  $('cartePeriode').classList.toggle('inactif', !dates.length);
+  $('cartePeriode').querySelector('input').disabled = !dates.length;
+  $('descPeriode').textContent = dates.length ? 'Un fichier par mois, trimestre ou année' : 'Aucune colonne de date reconnue dans ce fichier';
+  remplir($('colonne'), F.cols.map(function(x){ return x.nom; }), c.colonne);
+  remplir($('colDate'), dates.map(function(x){ return x.nom; }), c.colDate);
+  $('gran').value = c.gran; $('limite').value = c.limite.type; $('encodage').value = c.encodage; $('entete').checked = c.entete;
+  $('limiteValeur').value = c.limite.valeur || '';
+  erreurLimite('');
+  majRepartition();
+}
+/* Montre les champs utiles au réglage en cours, sans rien reconstruire (le champ en cours de saisie garde le focus) */
+function majRepartition(){
+  var c = etat.cfg, t = c.limite.type, saisie = t === 'lignes' || t === 'mo', groupe = c.par !== 'suite';
+  $('chColonne').hidden = c.par !== 'colonne'; $('chDate').hidden = c.par !== 'periode'; $('chGran').hidden = c.par !== 'periode';
+  $('chValeur').hidden = !saisie;
+  if (saisie) $('lblValeur').textContent = t === 'lignes' ? 'Lignes par fichier' : 'Mo par fichier';
+  $('aideLimite').textContent = t === 'aucune' ? (groupe ? 'Chaque fichier contient toutes ses lignes, quelle que soit sa taille.' : 'Toutes les lignes gardées vont dans un seul fichier.')
+    : (groupe ? 'Si un fichier dépasse cette taille, la suite va dans un fichier numéroté _2, puis _3.' : 'Chaque fichier est rempli jusqu’à cette taille, puis le suivant commence.');
+}
+function erreurLimite(msg){
+  $('limiteErr').textContent = msg; $('limiteErr').hidden = !msg;
+  $('limiteValeur').setAttribute('aria-invalid', msg ? 'true' : 'false');
+}
+function resumes(){
+  var F = etat.F, c = etat.cfg, g = colonnesGardees(), P = etat.plan, actifs = c.filtres.filter(filtreActif), incomplets = c.filtres.length - actifs.length, t;
+  $('r1').textContent = g.size === F.cols.length ? 'Les ' + F.cols.length + ' colonnes sont gardées.'
+    : (g.size ? pluriel(g.size, 'colonne gardée', 'colonnes gardées') + ' sur ' + F.cols.length + '.' : 'Aucune colonne gardée.');
+  if (!actifs.length) t = 'Toutes les lignes sont gardées.';
+  else if (P && P.fini && P.bilan) t = pluriel(P.bilan.gardees, 'ligne gardée', 'lignes gardées') + ' sur ' + fmtN(P.bilan.lues) + '.';
+  else t = pluriel(actifs.length, 'filtre') + ' : comptage des lignes en cours…';
+  if (incomplets) t += ' ' + (incomplets > 1 ? incomplets + ' filtres sont incomplets : choisis leurs valeurs.' : 'Un filtre est incomplet : choisis ses valeurs.');
+  $('r2').textContent = t;
+  $('r3').textContent = phraseRepartition(c) + (c.par === 'suite' && c.limite.type === 'aucune' ? '.' : ', ' + phraseLimite(c.limite) + '.');
+}
+function trierLots(lots, par){
+  var l = lots.slice();
+  if (par === 'colonne'){
+    var tot = new Map();
+    l.forEach(function(x){ tot.set(x.cle, (tot.get(x.cle) || 0) + x.lignes); });
+    l.sort(function(a, b){ return (tot.get(b.cle) - tot.get(a.cle)) || (a.cle < b.cle ? -1 : a.cle > b.cle ? 1 : a.part - b.part); });
+  } else if (par === 'periode') l.sort(function(a, b){ return a.cle < b.cle ? -1 : a.cle > b.cle ? 1 : a.part - b.part; });
+  return l;
+}
+function rendrePlan(){
+  var P = etat.plan, corps = $('planCorps'), e = $('planEtat');
+  vider(corps); rendreResultat();
+  $('tPlan').textContent = P && P.fait ? 'Ce que tu as obtenu' : 'Ce que tu vas obtenir';
+  if (!P){ e.hidden = true; $('rPlan').textContent = ''; return; }
+  if (P.bloquant){ e.hidden = true; $('rPlan').textContent = ''; corps.appendChild(el('p', {class:'note alerte', text:P.bloquant})); return; }
+  e.hidden = false;
+  e.className = 'etat ' + (P.fini ? 'exact' : 'calcul');
+  e.textContent = P.enCours ? 'Écriture en cours' : P.fait ? 'Fichiers écrits' : P.fini ? 'Nombres exacts' : 'Calcul en cours… ' + Math.round(P.pct * 100) + ' %';
+  var lots = P.lots || [], b = P.bilan;
+  if (!b){ $('rPlan').textContent = 'Lecture du fichier…'; return; }
+  $('rPlan').textContent = pluriel(lots.length, 'fichier') + ' · ' + pluriel(b.gardees, 'ligne') + (b.gardees < b.lues ? ' sur ' + fmtN(b.lues) : '') + ' · ' +
+                           pluriel(colonnesGardees().size, 'colonne') + (P.fini ? '' : ' (pour l’instant)');
+  if (P.fini && !lots.length){ corps.appendChild(el('p', {class:'note alerte', text:'Aucune ligne ne correspond à tes filtres : il n’y a rien à découper.'})); return; }
+  if (!lots.length) return;
+  var tri = trierLots(lots, etat.cfg.par), max = tri.reduce(function(m, l){ return Math.max(m, l.lignes); }, 1), vus = tri.slice(0, etat.planOuvert ? 500 : (tri.length <= 12 ? 12 : 8)), titres = etat.cfg.entete ? 1 : 0;
+  var liste = el('div', {class:'liste', role:'list'});
+  vus.forEach(function(l){
+    liste.appendChild(el('div', {class:'ligne' + (l.etat === 'ecrit' ? ' ecrit' : ''), role:'listitem'}, [
+      el('div', {class:'ligne-nom'}, [ic(l.etat === 'ecrit' ? 'coche' : 'fichier'), el('span', {text:l.nom, title:l.nom}),
+        l.lignes + titres > LIGNES_EXCEL ? el('em', {class:'marque-trop', text:'trop gros pour Excel'}) : null]),
+      el('div', {class:'num', text:pluriel(l.lignes, 'ligne')}),
+      el('div', {class:'taille num', text:fmtTaille(l.octets)}),
+      el('div', {class:'ligne-barre'}, [el('i', {style:'width:' + (l.lignes / max * 100).toFixed(1) + '%'})])
+    ]));
+  });
+  if (tri.length > vus.length) liste.appendChild(el('div', {class:'liste-pied'}, [etat.planOuvert
+    ? el('span', {class:'vide', text:'… et ' + pluriel(tri.length - vus.length, 'autre fichier', 'autres fichiers')})
+    : el('button', {type:'button', class:'btn-lien', data:{a:'tout'}, text:'Afficher les ' + fmtN(tri.length - vus.length) + ' autres fichiers'})]));
+  corps.appendChild(liste);
+}
+function rendreResultat(){
+  var r = etat.resultat, z = $('resultat');
+  vider(z); z.hidden = !r;
+  if (!r) return;
+  z.appendChild(el('h3', null, [ic('coche'), el('span', {text:r.titre})]));
+  z.appendChild(el('p', {text:r.detail}));
+  if (r.notes) z.appendChild(el('p', {text:r.notes}));
+  z.appendChild(el('details', null, [el('summary', {text:'Voir le récapitulatif'}), el('pre', {text:r.recap, tabindex:'0'})]));
+  z.appendChild(el('div', {class:'resultat-actions'}, [
+    el('button', {type:'button', class:'btn btn-secondaire', data:{a:'recette'}}, [ic('signet'), 'Enregistrer ces réglages comme recette']),
+    el('button', {type:'button', class:'btn btn-secondaire', data:{a:'autre'}, text:'Découper un autre fichier'})]));
+}
+function rendreAction(){
+  if (etat.enCours || !etat.F) return;
+  var P = etat.plan, api = !!window.showDirectoryPicker, bz = $('btnZip'), bd = $('btnDossier'), n = P && P.lots ? P.lots.length : 0, titre, detail = '', d = $('aDetail');
+  var possible = !!P && !P.bloquant && !(P.fini && !n);
+  $('jauge').hidden = true; $('btnArreter').hidden = true; bz.hidden = false; bd.hidden = !api;
+  bz.disabled = bd.disabled = !possible;
+  vider(bd); bd.appendChild(ic('dossier'));
+  bd.appendChild(document.createTextNode(etat.dossier ? 'Découper dans « ' + (etat.dossier.name || 'le dossier choisi') + ' »' : 'Découper dans un dossier…'));
+  vider(bz); bz.appendChild(ic('telecharger'));
+  bz.appendChild(document.createTextNode(P && P.fini && n === 1 ? 'Télécharger le fichier' : 'Télécharger en ZIP'));
+  bz.className = 'btn btn-grand ' + (api ? 'btn-secondaire' : 'btn-primaire');
+  if (!P) titre = 'Préparation…';
+  else if (P.bloquant){ titre = 'Découpe impossible pour l’instant'; detail = P.bloquant; }
+  else if (etat.resultat){ titre = 'Découpage terminé'; detail = etat.resultat.titre; }
+  else if (!P.fini){ titre = 'Calcul du résultat… ' + Math.round(P.pct * 100) + ' %'; detail = 'Tu peux lancer la découpe sans attendre.'; }
+  else if (!n){ titre = 'Rien à découper'; detail = 'Aucune ligne ne correspond à tes filtres.'; }
+  else {
+    titre = 'Prêt : ' + pluriel(n, 'fichier') + ', ' + pluriel(P.bilan.gardees, 'ligne');
+    detail = api ? 'Écris-les dans un dossier, ou télécharge-les.' : 'Ils arrivent dans Téléchargements' + (n > 1 ? ', réunis dans un fichier ZIP.' : '.');
+  }
+  $('aTitre').textContent = titre;
+  vider(d); d.appendChild(document.createTextNode(detail));
+  if (etat.dossier && possible && !etat.resultat){ d.appendChild(document.createTextNode(' ')); d.appendChild(el('button', {type:'button', class:'btn-lien', data:{a:'dossier'}, text:'Changer de dossier'})); }
+}
+function pastille(){ var p = $('nbRecettes'); p.hidden = !store.recettes.length; p.textContent = store.recettes.length; }
+
+/* ---------- Un réglage a changé ---------- */
+function modifie(){
+  etat.resultat = null; etat.planOuvert = false;
+  etat.R = resoudre(etat.cfg, etat.F);
+  store.pref = { limite:nettoyerLimite(etat.cfg.limite), encodage:etat.cfg.encodage, entete:etat.cfg.entete };
+  sauver();
+  rendreApercu(); resumes(); planifier();
+}
+/* Le plan est calculé pour de bon, sur tout le fichier, par le moteur de découpe lancé sans écriture */
+var tPlan = null;
+function annulerPlan(){ etat.jeton++; clearTimeout(tPlan); }
+function planifier(){
+  annulerPlan();
+  var F = etat.F, R = etat.R, jeton = etat.jeton;
+  if (R.bloquant){ etat.plan = { bloquant:R.bloquant }; rendrePlan(); rendreAction(); return; }
+  var P = etat.plan = { lots:[], bilan:null, fini:false, pct:0 }, dernier = 0;
+  rendrePlan(); rendreAction();
+  tPlan = setTimeout(function(){
+    executer(F, R, null, {
+      annule:function(){ return jeton !== etat.jeton; },
+      bloc:async function(lu, total, lots, bilan){
+        P.lots = lots; P.bilan = bilan; P.pct = lu / total;
+        var t = Date.now();
+        if (t - dernier > 350){ dernier = t; rendrePlan(); rendreAction(); }
+        await pause();
+      }
+    }).then(function(res){
+      if (jeton !== etat.jeton) return;
+      P.lots = res.lots; P.bilan = res.bilan; P.fini = true;
+      if (F.lignes == null){ F.lignes = res.bilan.lues; rendreFiche(); }
+      resumes(); rendrePlan(); rendreAction();
+    }).catch(function(e){
+      if (jeton !== etat.jeton || e.code === 'arret') return;
+      etat.plan = { bloquant:e.code === 'exces' ? 'Ce réglage produirait plus de ' + fmtN(MAX_FICHIERS) + ' fichiers. Choisis une autre colonne, ou une taille de fichier plus grande.'
+                           : e.code === 'ligne' ? 'Une ligne du fichier dépasse ' + fmtTaille(REGLAGES.ligneMax) + ' : un guillemet n’y est sans doute jamais refermé.'
+                           : 'Le fichier n’a pas pu être lu en entier (déplacé ou modifié ?). Dépose-le de nouveau.' };
+      rendrePlan(); rendreAction();
+    });
+  }, 150);
+}
+
+/* ---------- Valeurs d'une colonne ---------- */
+var dv = { i:-1, idx:-1, choix:null, visibles:[] };
+function valeursEchantillon(idx){
+  var m = new Map();
+  etat.F.rows.forEach(function(r){ var v = r[idx] == null ? '' : String(r[idx]).trim(); m.set(v, (m.get(v) || 0) + 1); });
+  return m;
+}
+/* Liste immédiate d'après le début du fichier, puis comptage exact sur tout le fichier */
+function assurerValeurs(idx){
+  var F = etat.F, V = etat.valeurs[idx];
+  if (V) return V;
+  V = etat.valeurs[idx] = { map:valeursEchantillon(idx), exact:F.exact, trop:false, pct:0, erreur:false };
+  if (!F.exact) compterValeurs(F, idx, {
+    annule:function(){ return etat.F !== F; },
+    bloc:async function(lu, total){ V.pct = lu / total; if (dv.idx === idx && $('dlgValeurs').open) infoValeurs(); await pause(); }
+  }).then(function(r){
+    V.map = r.map; V.trop = r.trop; V.exact = true;
+    if (etat.F === F && dv.idx === idx && $('dlgValeurs').open) rendreValeurs();
+  }).catch(function(e){ if (e.code !== 'arret'){ V.erreur = true; if (dv.idx === idx && $('dlgValeurs').open) infoValeurs(); } });
+  return V;
+}
+function ouvrirValeurs(i){
+  var f = etat.cfg.filtres[i], c = colParNom(f.col);
+  if (!c) return;
+  dv.i = i; dv.idx = c.idx; dv.choix = new Set(f.valeurs);
+  $('dvTitre').textContent = '« ' + f.col + ' » : valeurs ' + (f.op === 'horsde' ? 'à écarter' : 'à garder');
+  $('dvCherche').value = '';
+  assurerValeurs(c.idx); rendreValeurs();
+  $('dlgValeurs').showModal();
+  $('dvCherche').focus();
+}
+function rendreValeurs(){
+  var V = etat.valeurs[dv.idx], q = norm($('dvCherche').value), liste = $('dvListe'), tout = Array.from(V.map.entries());
+  dv.choix.forEach(function(v){ if (!V.map.has(v)) tout.push([v, 0]); });      // valeurs cochées mais absentes de ce fichier
+  tout.sort(function(a, b){ return b[1] - a[1] || (a[0] < b[0] ? -1 : 1); });
+  dv.visibles = q ? tout.filter(function(p){ return norm(p[0] === '' ? '(vide)' : p[0]).indexOf(q) >= 0; }) : tout;
+  vider(liste);
+  dv.visibles.slice(0, 300).forEach(function(p, k){
+    liste.appendChild(el('label', {class:'case'}, [el('input', {type:'checkbox', checked:dv.choix.has(p[0]), data:{k:k}}),
+      el('span', {text:p[0] === '' ? '(vide)' : p[0]}), el('em', {text:V.exact ? fmtN(p[1]) : ''})]));
+  });
+  if (!dv.visibles.length) liste.appendChild(el('p', {class:'vide', text:q ? 'Aucune valeur ne correspond à ta recherche.' : 'Cette colonne est vide.'}));
+  infoValeurs();
+}
+function infoValeurs(){
+  var V = etat.valeurs[dv.idx], t;
+  if (V.erreur) t = 'Le comptage complet a échoué : seules les valeurs du début du fichier sont listées.';
+  else if (!V.exact) t = 'Valeurs du début du fichier. Comptage sur tout le fichier : ' + Math.round(V.pct * 100) + ' %…';
+  else t = (V.trop ? 'Plus de ' + fmtN(V.map.size) + ' valeurs différentes : seules les premières sont listées.' : pluriel(V.map.size, 'valeur différente', 'valeurs différentes') + ', avec leur nombre de lignes.');
+  if (dv.visibles.length > 300) t += ' Les 300 plus fréquentes sont affichées : cherche pour trouver les autres.';
+  $('dvInfo').textContent = t;
+  $('dvValider').textContent = 'Valider (' + pluriel(dv.choix.size, 'valeur') + ')';
+}
+function ajouterFiltre(col, ouvrir){
+  var c = etat.cfg, i = -1;
+  col = col || (c.par === 'colonne' && colParNom(c.colonne) ? c.colonne : etat.F.cols[0].nom);
+  if (ouvrir) c.filtres.forEach(function(x, k){ if (x.col === col && (x.op === 'parmi' || x.op === 'horsde')) i = k; });   // un filtre de valeurs existe déjà sur cette colonne : on le rouvre
+  if (i < 0){ c.filtres.push({ col:col, op:'parmi', valeurs:[], texte:'' }); i = c.filtres.length - 1; }
+  rendreFiltres(); modifie();
+  if (ouvrir) ouvrirValeurs(i);
+  else { var s = $('filtres').querySelector('.filtre[data-i="' + i + '"] select'); if (s) s.focus(); }
+}
+
+/* ---------- Destinations ---------- */
+async function existe(dir, nom){
+  try { await dir.getDirectoryHandle(nom); return true; }
+  catch (e){ if (e.name === 'TypeMismatchError') return true; }
+  try { await dir.getFileHandle(nom); return true; }
+  catch (e2){ return e2.name === 'TypeMismatchError'; }
+}
+/* Dans un dossier : les fichiers vont dans un sous-dossier neuf, pour ne jamais écraser un fichier existant */
+async function sortieDossier(parent, base){
+  var nom = base + '_lots', k = 1;
+  while (await existe(parent, nom)){ k++; nom = base + '_lots-' + k; }
+  var dir = await parent.getDirectoryHandle(nom, {create:true}), ouverts = [];
+  return {
+    lieu: (parent.name ? parent.name + '/' : '') + nom,
+    ecrire: async function(lot, u8){
+      if (!lot.h){
+        try { lot.h = await dir.getFileHandle(lot.nom, {create:true}); }
+        catch (e){ var x = erreur('nom'); x.nom = lot.nom; throw x; }
+        lot.pos = 0;
+      }
+      if (!lot.w){
+        lot.w = await lot.h.createWritable({keepExistingData:true});
+        ouverts.push(lot);
+        if (ouverts.length > REGLAGES.ouverts){ var vieux = ouverts.shift(); await vieux.w.close(); vieux.w = null; }   // il rouvrira à la suite
+      }
+      await lot.w.write({type:'write', position:lot.pos, data:u8});
+      lot.pos += u8.length;
+    },
+    fermer: async function(lot){ if (lot.w){ ouverts.splice(ouverts.indexOf(lot), 1); await lot.w.close(); lot.w = null; } },
+    taille: async function(lot){ return (await lot.h.getFile()).size; },
+    ajouter: async function(n, u8){ var h = await dir.getFileHandle(n, {create:true}), w = await h.createWritable(); await w.write(u8); await w.close(); },
+    abandonner: async function(){
+      for (var i = 0; i < ouverts.length; i++){ try { await ouverts[i].w.abort(); } catch (e){} }
+      try { await parent.removeEntry(nom, {recursive:true}); return true; } catch (e){ return false; }
+    }
+  };
+}
+function telecharger(blob, nom){
+  var a = document.createElement('a'), url = URL.createObjectURL(blob);
+  a.href = url; a.download = nom; a.style.display = 'none';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 120000);
+}
+function choisirDossier(){
+  if (!window.showDirectoryPicker) return Promise.resolve();
+  return window.showDirectoryPicker({mode:'readwrite'}).then(function(h){ etat.dossier = h; }).catch(function(){});
+}
+
+/* ---------- Découpage ---------- */
+function verrouiller(on){
+  $('etapes').inert = on; $('etapes').classList.toggle('verrou', on);
+  $('btnChanger').disabled = on; $('btnRecettes').disabled = on; $('btnZero').disabled = on;
+}
+function avancement(live){
+  var pct = Math.round(live.pct * 100), n = live.lots.length;
+  $('aTitre').textContent = 'Découpage en cours… ' + pct + ' %';
+  $('aDetail').textContent = pluriel(live.bilan.gardees, 'ligne répartie', 'lignes réparties') + ' dans ' + pluriel(n, 'fichier') + '.';
+  $('jaugeBarre').style.width = (live.pct * 100) + '%';
+}
+function compteRendu(res, dest, lieu, livre, recap){
+  var b = res.bilan, n = res.lots.length, ecartees = b.lues - b.gardees, notes = [], titre;
+  if (dest === 'dossier') titre = pluriel(n, 'fichier écrit', 'fichiers écrits') + ' dans le dossier « ' + lieu + ' »';
+  else if (n === 1) titre = '« ' + livre + ' » est dans Téléchargements';
+  else titre = pluriel(n, 'fichier réuni', 'fichiers réunis') + ' dans « ' + livre + ' », dans Téléchargements';
+  if (b.vides) notes.push(pluriel(b.vides, 'ligne vide ignorée', 'lignes vides ignorées') + '.');
+  if (b.remplaces) notes.push(pluriel(b.remplaces, 'caractère', 'caractères') + ' sans équivalent en Windows-1252 ' + (b.remplaces > 1 ? 'ont été remplacés' : 'a été remplacé') + ' par « ? ».');
+  return { titre:titre, recap:recap, notes:notes.join(' '),
+           detail:'Contrôle : ' + pluriel(b.lues, 'ligne lue', 'lignes lues') + (ecartees ? ', ' + fmtN(b.gardees) + ' gardée' + (b.gardees > 1 ? 's' : '') + ' et ' + fmtN(ecartees) + ' écartée' + (ecartees > 1 ? 's' : '') + ' par tes filtres.'
+                                                                                           : ', toutes rangées dans les fichiers.') + (n > 1 || dest === 'dossier' ? ' Un récapitulatif est joint.' : '') };
+}
+function raisonEchec(e, lieu){
+  var s;
+  if (e.code === 'arret') s = 'Découpage arrêté.';
+  else if (e.code === 'exces') s = 'Découpage interrompu : ce réglage dépasse le maximum de ' + fmtN(MAX_FICHIERS) + ' fichiers.';
+  else if (e.code === 'ligne') s = 'Découpage interrompu : une ligne dépasse ' + fmtTaille(REGLAGES.ligneMax) + ', un guillemet n’y est sans doute jamais refermé.';
+  else if (e.code === 'nom') s = 'Découpage interrompu : le fichier « ' + e.nom + ' » n’a pas pu être créé dans le dossier.';
+  else if (e.code === 'controle') s = 'Découpage annulé : le contrôle des fichiers écrits a échoué.';
+  else if (e.name === 'QuotaExceededError') s = 'Découpage interrompu : il n’y a plus assez de place sur le disque.';
+  else if (e.name === 'NotReadableError' || e.name === 'NotFoundError') s = 'Découpage interrompu : le fichier d’origine n’est plus lisible (déplacé ou modifié ?). Dépose-le de nouveau.';
+  else if (e.name === 'NotAllowedError' || e.name === 'SecurityError') s = 'Découpage interrompu : l’accès au dossier a été refusé.';
+  else s = 'Découpage interrompu : ' + (e.message || String(e)) + '.';
+  return s + (lieu ? ' Supprime le dossier « ' + lieu + ' » : il contient des fichiers incomplets.' : ' Aucun fichier n’a été conservé.');
+}
+/* Tout ou rien : un découpage arrêté ou en erreur ne laisse aucun fichier derrière lui */
+async function lancer(dest){
+  var F = etat.F;
+  if (!F || etat.enCours) return;
+  var R = resoudre(etat.cfg, F);
+  if (R.bloquant) return dire(R.bloquant, 'alerte');
+  etat.enCours = true; etat.arret = false;      // posé tout de suite : pas de double lancement pendant le choix du dossier
+  if (dest === 'dossier'){
+    if (!etat.dossier) await choisirDossier();
+    if (etat.dossier && etat.dossier.requestPermission){
+      var perm = 'denied';
+      try { perm = await etat.dossier.requestPermission({mode:'readwrite'}); } catch (e){}
+      if (perm !== 'granted'){ etat.dossier = null; dire('L’accès au dossier a été refusé. Choisis-le de nouveau.', 'alerte'); }
+    }
+    if (!etat.dossier){ etat.enCours = false; rendreAction(); return; }
+  } else if (F.taille > REGLAGES.memoire){
+    etat.enCours = false;
+    return dire(window.showDirectoryPicker ? 'Ce fichier dépasse ' + fmtTaille(REGLAGES.memoire) + ' : passe par « Découper dans un dossier », les fichiers y sont écrits directement.'
+                                           : 'Ce fichier dépasse ' + fmtTaille(REGLAGES.memoire) + ' et ce navigateur ne sait pas écrire dans un dossier. Ouvre Allotir dans Edge ou Chrome.', 'alerte');
+  }
+  annulerPlan(); fermerMenu(); verrouiller(true);
+  etat.resultat = null;
+  var live = etat.plan = { lots:[], bilan:{lues:0, gardees:0, vides:0, remplaces:0}, fini:false, enCours:true, pct:0 };
+  var dernier = 0, sortie = null, base = baseNom(F.nom), cfg = nettoyerConfig(etat.cfg);
+  $('btnZip').hidden = true; $('btnDossier').hidden = true; $('btnArreter').hidden = false; $('jauge').hidden = false;
+  avancement(live); rendrePlan();
+  try {
+    sortie = dest === 'dossier' ? await sortieDossier(etat.dossier, base) : sortieMemoire();
+    var res = await executer(F, R, sortie, {
+      annule:function(){ return etat.arret; },
+      bloc:async function(lu, total, lots, bilan){
+        live.lots = lots; live.bilan = bilan; live.pct = lu / total;
+        avancement(live);
+        var t = Date.now();
+        if (t - dernier > 400){ dernier = t; rendrePlan(); }
+      }
+    });
+    F.lignes = res.bilan.lues;
+    if (!res.lots.length){
+      await sortie.abandonner();
+      etat.plan = { lots:[], bilan:res.bilan, fini:true };
+      dire('Aucune ligne ne correspond à tes filtres : aucun fichier n’a été écrit.');
+    } else {
+      var lieu = dest === 'dossier' ? sortie.lieu : '', livre = null;
+      var recap = recapitulatif(F, cfg, res, lieu ? 'le dossier ' + lieu : '', new Date().toLocaleString('fr-FR', {dateStyle:'short', timeStyle:'short'}));
+      if (dest === 'dossier' || res.lots.length > 1) await sortie.ajouter(base + '_recapitulatif.txt', joindre(new Uint8Array([0xEF, 0xBB, 0xBF]), new TextEncoder().encode(recap)));
+      if (dest !== 'dossier'){
+        if (res.lots.length === 1){ livre = res.lots[0].nom; telecharger(new Blob(res.lots[0].blobs, {type:'text/csv'}), livre); }
+        else { livre = base + '_lots.zip'; telecharger(zip(sortie.entrees(res.lots)), livre); }
+      }
+      etat.plan = { lots:res.lots, bilan:res.bilan, fini:true, fait:true };
+      etat.resultat = compteRendu(res, dest, lieu, livre, recap);
+      store.derniere = { signature:F.signature, config:cfg }; sauver();
+    }
+  } catch (e){
+    var propre = sortie ? await sortie.abandonner() : true;
+    etat.plan = null;
+    dire(raisonEchec(e, propre ? null : sortie.lieu), e.code === 'arret' ? '' : 'alerte');
+  }
+  etat.enCours = false; etat.arret = false; verrouiller(false);
+  etat.R = resoudre(etat.cfg, F);
+  rendreFiche(); resumes();
+  if (!etat.plan) planifier(); else { rendrePlan(); rendreAction(); }
+  if (etat.resultat){ $('cartePlan').scrollIntoView({behavior:'smooth', block:'start'}); annoncer('Découpage terminé : ' + etat.resultat.titre + '.'); }
+}
+
+/* ---------- Recettes ---------- */
+function rendreRecettes(){
+  var l = $('drListe');
+  vider(l);
+  $('drAjout').hidden = !etat.F;
+  if (!store.recettes.length) l.appendChild(el('p', {class:'vide', text:etat.F ? 'Aucune recette pour l’instant. Donne un nom à tes réglages ci-dessus pour les retrouver ici.'
+                                                                                 : 'Aucune recette pour l’instant. Dépose un fichier, règle ta découpe, puis reviens l’enregistrer ici.'}));
+  store.recettes.forEach(function(r){
+    l.appendChild(el('div', {class:'recette', data:{id:r.id}}, [
+      el('div', {class:'recette-corps'}, [el('b', {text:r.nom}), el('p', {text:resumeConfig(r.config)})]),
+      el('button', {type:'button', class:'btn btn-secondaire', data:{a:'appliquer'}, text:'Appliquer'}),
+      el('button', {type:'button', class:'btn btn-discret btn-icone', data:{a:'supprimer'}, 'aria-label':'Supprimer la recette ' + r.nom, title:'Supprimer'}, [ic('corbeille')])]));
+  });
+  pastille();
+}
+function direRecettes(msg){ $('drInfo').textContent = msg; $('drInfo').hidden = !msg; }
+function ouvrirRecettes(){ rendreRecettes(); direRecettes(''); $('drNom').value = ''; $('dlgRecettes').showModal(); if (etat.F) $('drNom').focus(); }
+function enregistrerRecette(){
+  var nom = $('drNom').value.trim().slice(0, 80), cfg = nettoyerConfig(etat.cfg), i = -1;
+  if (!nom){ $('drNom').focus(); return direRecettes('Donne d’abord un nom à la recette.'); }
+  store.recettes.forEach(function(r, k){ if (norm(r.nom) === norm(nom)) i = k; });
+  if (i >= 0){ store.recettes[i].config = cfg; store.recettes[i].nom = nom; }
+  else store.recettes.unshift({ id:'r' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36), nom:nom, cree:new Date().toISOString(), config:cfg });
+  sauverMaintenant(); $('drNom').value = ''; rendreRecettes();
+  direRecettes(i >= 0 ? 'Recette « ' + nom + ' » mise à jour.' : 'Recette « ' + nom + ' » enregistrée.');
+}
+function appliquerRecette(r){
+  $('dlgRecettes').close();
+  if (!etat.F){
+    etat.recetteEnAttente = r;
+    $('texteDepot').textContent = 'La recette « ' + r.nom + ' » s’appliquera au fichier que tu déposes.';
+    return;
+  }
+  var a = adapter(r.config, etat.F.cols);
+  completer(a.config);
+  etat.cfg = a.config; etat.bandeau = bandeauRecette(r.nom, a.absents); etat.resultat = null; etat.planOuvert = false;
+  toutRendre(); planifier();
+}
+function importerRecettes(file){
+  file.text().then(function(txt){
+    var brut = jparse(txt), lu = migrer(brut && typeof brut === 'object' ? { recettes:brut.recettes } : null).recettes, n = 0;
+    if (!lu.length) return direRecettes('Ce fichier ne contient aucune recette lisible.');
+    lu.forEach(function(r){
+      var i = -1;
+      store.recettes.forEach(function(x, k){ if (norm(x.nom) === norm(r.nom)) i = k; });
+      if (i >= 0) store.recettes[i].config = r.config; else store.recettes.push(r);
+      n++;
+    });
+    store = migrer(store); sauverMaintenant(); rendreRecettes();
+    direRecettes(pluriel(n, 'recette importée', 'recettes importées') + '.');
+  }).catch(function(){ direRecettes('Ce fichier n’a pas pu être lu.'); });
+}
+function exporterRecettes(){
+  if (!store.recettes.length) return direRecettes('Aucune recette à exporter.');
+  telecharger(new Blob([JSON.stringify({ application:'Allotir', schemaVersion:VERSION_SCHEMA, recettes:store.recettes }, null, 2)], {type:'application/json'}), 'allotir_recettes.json');
+}
+
+/* ---------- Thème, menu de colonne ---------- */
+function appliquerTheme(){
+  var sombre = store.theme === 'sombre';
+  if (sombre) document.documentElement.setAttribute('data-theme', 'dark'); else document.documentElement.removeAttribute('data-theme');
+  $('icTheme').setAttribute('href', sombre ? '#i-soleil' : '#i-lune');
+  $('btnTheme').setAttribute('aria-label', sombre ? 'Passer au thème clair' : 'Passer au thème sombre');
+}
+var menuIdx = -1, menuOrigine = null;
+function ouvrirMenu(b){
+  var m = $('menuCol'), r = b.getBoundingClientRect();
+  menuIdx = +b.dataset.idx; menuOrigine = b; m.hidden = false;
+  m.style.left = Math.max(8, Math.min(r.left, document.documentElement.clientWidth - m.offsetWidth - 8)) + window.scrollX + 'px';
+  m.style.top = (r.bottom + window.scrollY + 4) + 'px';
+  m.querySelector('button').focus();
+}
+function fermerMenu(retour){
+  if ($('menuCol').hidden) return;
+  $('menuCol').hidden = true;
+  if (retour && menuOrigine && document.contains(menuOrigine)) menuOrigine.focus();
+}
+
+/* ---------- Branchements ---------- */
+function init(){
+  TEXTE_DEPOT = $('texteDepot').textContent;
+  appliquerTheme(); pastille();
+
+  $('btnChoisir').addEventListener('click', function(){ $('choixFichier').click(); });
+  $('btnChanger').addEventListener('click', function(){ $('choixFichier').click(); });
+  $('choixFichier').addEventListener('change', function(){ var f = this.files[0]; this.value = ''; charger(f); });
+  $('btnExemple').addEventListener('click', function(){ charger(fichierExemple(), true); });
+  $('btnTheme').addEventListener('click', function(){ store.theme = store.theme === 'sombre' ? 'clair' : 'sombre'; appliquerTheme(); sauver(); });
+  $('btnZero').addEventListener('click', function(){
+    var c = configParDefaut();
+    completer(c);
+    etat.cfg = c; etat.bandeau = null; etat.resultat = null;
+    toutRendre(); planifier();
+  });
+
+  /* Dépôt par glisser, n'importe où sur la page */
+  var survols = 0;
+  function avecFichiers(e){ return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0; }
+  document.addEventListener('dragenter', function(e){ if (!avecFichiers(e) || etat.enCours) return; e.preventDefault(); survols++; $('voile').hidden = false; $('zoneDepot').classList.add('survol'); });
+  document.addEventListener('dragover', function(e){ if (avecFichiers(e)) e.preventDefault(); });
+  document.addEventListener('dragleave', function(){ survols = Math.max(0, survols - 1); if (!survols){ $('voile').hidden = true; $('zoneDepot').classList.remove('survol'); } });
+  document.addEventListener('drop', function(e){
+    if (!avecFichiers(e)) return;
+    e.preventDefault(); survols = 0; $('voile').hidden = true; $('zoneDepot').classList.remove('survol');
+    if (!etat.enCours && e.dataTransfer.files[0]) charger(e.dataTransfer.files[0]);
+  });
+
+  /* Étape 1 : colonnes */
+  $('chercheCol').addEventListener('input', rendreColonnes);
+  $('colTout').addEventListener('click', function(){ etat.cfg.colonnes = null; rendreColonnes(); modifie(); });
+  $('colRien').addEventListener('click', function(){ etat.cfg.colonnes = []; rendreColonnes(); modifie(); });
+  $('grilleCol').addEventListener('change', function(e){
+    if (e.target.dataset.idx == null) return;
+    var g = colonnesGardees(), nom = etat.F.cols[+e.target.dataset.idx].nom;
+    if (e.target.checked) g.add(nom); else g.delete(nom);
+    fixerColonnes(g);
+  });
+  $('apercu').addEventListener('click', function(e){ var b = e.target.closest('.entete'); if (b) ouvrirMenu(b); });
+  $('apercuZone').addEventListener('scroll', function(){ fermerMenu(); });
+  $('menuCol').addEventListener('click', function(e){
+    var b = e.target.closest('button'), c = etat.F.cols[menuIdx];
+    if (!b || !c) return;
+    fermerMenu();
+    if (b.dataset.a === 'decouper'){
+      etat.cfg.par = 'colonne'; etat.cfg.colonne = c.nom;
+      rendreRepartition(); modifie();
+      $('t3').scrollIntoView({behavior:'smooth', block:'center'});
+    } else if (b.dataset.a === 'filtrer') ajouterFiltre(c.nom, true);
+    else { var g = colonnesGardees(); g.delete(c.nom); fixerColonnes(g); rendreColonnes(); }
+  });
+  $('menuCol').addEventListener('keydown', function(e){
+    var bs = Array.prototype.slice.call(this.querySelectorAll('button')), i = bs.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown'){ e.preventDefault(); bs[(i + 1) % bs.length].focus(); }
+    else if (e.key === 'ArrowUp'){ e.preventDefault(); bs[(i - 1 + bs.length) % bs.length].focus(); }
+    else if (e.key === 'Escape' || e.key === 'Tab'){ e.preventDefault(); fermerMenu(true); }
+  });
+  document.addEventListener('click', function(e){ if (!e.target.closest('#menuCol') && !e.target.closest('.entete')) fermerMenu(); });
+
+  /* Étape 2 : filtres */
+  $('ajoutFiltre').addEventListener('click', function(){ ajouterFiltre(null, false); });
+  $('logique').addEventListener('change', function(){ etat.cfg.logique = this.value; modifie(); });
+  $('filtres').addEventListener('change', function(e){
+    var d = e.target.closest('.filtre'), k = e.target.dataset.k;
+    if (!d || (k !== 'col' && k !== 'op')) return;
+    var i = +d.dataset.i, f = etat.cfg.filtres[i];
+    if (k === 'col'){ f.col = e.target.value; f.valeurs = []; } else f.op = e.target.value;
+    rendreFiltres(); modifie();
+    var cible = $('filtres').querySelector('.filtre[data-i="' + i + '"] [data-k="' + k + '"]');
+    if (cible) cible.focus();
+  });
+  $('filtres').addEventListener('input', function(e){
+    var d = e.target.closest('.filtre');
+    if (!d || e.target.dataset.k !== 'texte') return;
+    etat.cfg.filtres[+d.dataset.i].texte = e.target.value;      // pas de reconstruction : le champ garde le focus
+    modifie();
+  });
+  $('filtres').addEventListener('click', function(e){
+    var b = e.target.closest('button'), d = e.target.closest('.filtre');
+    if (!b || !d) return;
+    if (b.dataset.k === 'valeurs') ouvrirValeurs(+d.dataset.i);
+    else if (b.dataset.k === 'suppr'){ etat.cfg.filtres.splice(+d.dataset.i, 1); rendreFiltres(); modifie(); $('ajoutFiltre').focus(); }
+  });
+
+  /* Fenêtre des valeurs */
+  $('dvCherche').addEventListener('input', rendreValeurs);
+  $('dvListe').addEventListener('change', function(e){
+    if (e.target.dataset.k == null) return;
+    var v = dv.visibles[+e.target.dataset.k][0];
+    if (e.target.checked) dv.choix.add(v); else dv.choix.delete(v);
+    infoValeurs();
+  });
+  $('dvTout').addEventListener('click', function(){ dv.visibles.forEach(function(p){ dv.choix.add(p[0]); }); rendreValeurs(); });
+  $('dvRien').addEventListener('click', function(){ dv.visibles.forEach(function(p){ dv.choix.delete(p[0]); }); rendreValeurs(); });
+  $('dvAnnuler').addEventListener('click', function(){ $('dlgValeurs').close(); });
+  $('dvFermer').addEventListener('click', function(){ $('dlgValeurs').close(); });
+  $('dvValider').addEventListener('click', function(){
+    var f = etat.cfg.filtres[dv.i];
+    $('dlgValeurs').close();
+    if (!f) return;
+    f.valeurs = Array.from(dv.choix);
+    rendreFiltres(); modifie();
+    var b = $('filtres').querySelector('.filtre[data-i="' + dv.i + '"] [data-k="valeurs"]');
+    if (b) b.focus();
+  });
+  $('dlgValeurs').addEventListener('close', function(){ dv.idx = -1; });
+
+  /* Étape 3 : répartition */
+  document.querySelectorAll('input[name=par]').forEach(function(r){
+    r.addEventListener('change', function(){ if (this.checked){ etat.cfg.par = this.value; majRepartition(); modifie(); } });
+  });
+  $('colonne').addEventListener('change', function(){ etat.cfg.colonne = this.value; modifie(); });
+  $('colDate').addEventListener('change', function(){ etat.cfg.colDate = this.value; modifie(); });
+  $('gran').addEventListener('change', function(){ etat.cfg.gran = this.value; modifie(); });
+  $('limite').addEventListener('change', function(){
+    var t = this.value;
+    etat.cfg.limite = { type:t, valeur:t === 'lignes' || t === 'mo' ? etat.memo[t] : 0 };
+    $('limiteValeur').value = etat.cfg.limite.valeur || '';
+    erreurLimite(''); majRepartition(); modifie();
+  });
+  $('limiteValeur').addEventListener('input', function(){
+    var t = etat.cfg.limite.type, v = this.value.trim() === '' ? NaN : +this.value, min = t === 'mo' ? 0.1 : 1;
+    if (!isFinite(v) || v < min) return erreurLimite('Indique un nombre d’au moins ' + (t === 'mo' ? '0,1' : '1') + '. En attendant, le calcul garde ' + String(etat.cfg.limite.valeur).replace('.', ',') + '.');
+    erreurLimite('');
+    etat.cfg.limite.valeur = etat.memo[t] = t === 'lignes' ? Math.round(v) : v;
+    modifie();
+  });
+  $('encodage').addEventListener('change', function(){ etat.cfg.encodage = this.value; modifie(); });
+  $('entete').addEventListener('change', function(){ etat.cfg.entete = this.checked; modifie(); });
+
+  /* Plan, résultat, action */
+  $('cartePlan').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-a]');
+    if (!b) return;
+    if (b.dataset.a === 'tout'){ etat.planOuvert = true; rendrePlan(); }
+    else if (b.dataset.a === 'recette') ouvrirRecettes();
+    else if (b.dataset.a === 'autre') $('choixFichier').click();
+  });
+  $('aDetail').addEventListener('click', function(e){
+    if (!e.target.closest('button[data-a="dossier"]')) return;
+    choisirDossier().then(rendreAction);
+  });
+  $('btnZip').addEventListener('click', function(){ lancer('zip'); });
+  $('btnDossier').addEventListener('click', function(){ lancer('dossier'); });
+  $('btnArreter').addEventListener('click', function(){ etat.arret = true; this.disabled = true; setTimeout(function(){ $('btnArreter').disabled = false; }, 1500); });
+
+  /* Recettes */
+  $('btnRecettes').addEventListener('click', ouvrirRecettes);
+  $('drFermer').addEventListener('click', function(){ $('dlgRecettes').close(); });
+  $('drEnregistrer').addEventListener('click', enregistrerRecette);
+  $('drNom').addEventListener('keydown', function(e){ if (e.key === 'Enter'){ e.preventDefault(); enregistrerRecette(); } });
+  $('drExporter').addEventListener('click', exporterRecettes);
+  $('drImporter').addEventListener('click', function(){ $('drFichier').click(); });
+  $('drFichier').addEventListener('change', function(){ var f = this.files[0]; this.value = ''; if (f) importerRecettes(f); });
+  $('drListe').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-a]'), d = e.target.closest('.recette');
+    if (!b || !d) return;
+    var r = store.recettes.filter(function(x){ return x.id === d.dataset.id; })[0];
+    if (!r) return;
+    if (b.dataset.a === 'appliquer') appliquerRecette(r);
+    else if (b.dataset.confirme){ store.recettes = store.recettes.filter(function(x){ return x !== r; }); sauverMaintenant(); rendreRecettes(); }
+    else {      // premier clic : on demande confirmation, sans fenêtre de plus
+      b.dataset.confirme = '1'; b.className = 'btn btn-danger';
+      vider(b); b.appendChild(document.createTextNode('Supprimer ?'));
+      setTimeout(function(){ if (document.contains(b)) rendreRecettes(); }, 4000);
+    }
+  });
+
+  window.addEventListener('beforeunload', function(e){
+    if (tSauve) sauverMaintenant();
+    if (etat.enCours){ e.preventDefault(); e.returnValue = ''; }
+  });
+}
+
+/* ---------- Banc d'essai, à lancer dans la console : App.tester() ---------- */
+App.tester = async function(){
+  var ok = 0, ko = 0, avant = JSON.stringify(store), cfgAvant = JSON.stringify(etat.cfg);
+  function v(nom, c){ if (c) ok++; else { ko++; console.error('ÉCHEC : ' + nom); } }
+  try {
+    ['accueil', 'atelier', 'choixFichier', 'apercu', 'filtres', 'limite', 'planCorps', 'btnZip', 'btnDossier', 'dlgValeurs', 'dlgRecettes'].forEach(function(id){ v('élément #' + id, !!$(id)); });
+    v('trois façons de répartir', document.querySelectorAll('input[name=par]').length === 3);
+    /* le moteur, sur un petit fichier fabriqué en mémoire */
+    var txt = 'Id;Mag;Note\r\n1;Lyon;"a;b"\r\n2;Rome;x\r\n3;Lyon;é\r\n', u8 = new TextEncoder().encode(txt);
+    var F = Object.assign(analyserEchantillon(u8, true), { file:new Blob([u8]), nom:'banc.csv', taille:u8.length });
+    var cfg = nettoyerConfig({ par:'colonne', colonne:'Mag', colonnes:['Id', 'Note'] }), s = sortieMemoire();
+    var plan = await executer(F, resoudre(cfg, F), null, {}), reel = await executer(F, resoudre(cfg, F), s, {});
+    v('plan = découpage réel', plan.lots.length === 2 && plan.lots.every(function(l, i){ return l.nom === reel.lots[i].nom && l.octets === reel.lots[i].ecrits; }));
+    v('contenu du fichier « Lyon »', await new Blob(reel.lots[0].blobs).text() === 'Id;Note\r\n1;"a;b"\r\n3;é\r\n');
+    v('archive ZIP construite', zip(s.entrees(reel.lots)).size > 100);
+    /* le stockage : écriture puis relecture réelles, sur une clé à part */
+    var essai = migrer({ theme:'sombre', recettes:[{ nom:'Banc', config:cfg }] }), ecrit = lsSet(CLE + '.banc', JSON.stringify(essai));
+    v('stockage : aller-retour', !ecrit || JSON.stringify(migrer(jparse(lsGet(CLE + '.banc')))) === JSON.stringify(essai));
+    if (!ecrit) console.warn('Stockage indisponible dans ce navigateur : réglages et recettes ne seront pas mémorisés.');
+    /* la liaison champ → état → affichage, si un fichier est ouvert */
+    if (etat.F && !etat.enCours){
+      $('limite').value = 'lignes'; $('limite').dispatchEvent(new Event('change', {bubbles:true}));
+      v('champ « taille maximale » → état', etat.cfg.limite.type === 'lignes' && !$('chValeur').hidden);
+      v('état → résumé de l’étape 3', /lignes? au plus/.test($('r3').textContent));
+    }
+  } catch (e){ ko++; console.error('ÉCHEC : exception', e); }
+  finally {
+    try { localStorage.removeItem(CLE + '.banc'); } catch (e){}
+    store = migrer(jparse(avant)); sauverMaintenant();
+    if (etat.F && !etat.enCours){ etat.cfg = nettoyerConfig(jparse(cfgAvant)); toutRendre(); planifier(); }
+  }
+  console.log('Allotir, banc d’essai : ' + ok + ' vérifications réussies, ' + ko + ' en échec. Rien n’a été modifié : tes réglages et tes recettes sont intacts.');
+  return { ok:ok, ko:ko };
+};
+App.etat = etat; App.reglages = REGLAGES; App.charger = charger; App.store = function(){ return store; };
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+</script>
+</body>
+</html>
